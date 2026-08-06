@@ -113,10 +113,9 @@ test('precompile removal changes x402 packing, not the scheduler fit', () => {
 test('today enforces one checkpoint per transaction even with stale batched input', () => {
     const inputs = {
         ...TODAY,
-        checkpointBatchSize: X402_CHECKPOINT_DEFAULT_BATCH,
+        checkpointBatchSize: MPP_CHECKPOINT_DEFAULT_BATCH,
         checkpointClockSeconds: 120,
-        scheme: 'x402' as const,
-        voucherVerifyPerSecond: 2_000_000,
+        scheme: 'mpp' as const,
     };
     const result = evaluateModel(inputs, {
         ...DEFAULT_DEMAND,
@@ -126,6 +125,7 @@ test('today enforces one checkpoint per transaction even with stale batched inpu
     });
 
     assert.equal(effectiveCheckpointBatchSize(inputs), 1);
+    // MPP uses the finalized deployed settle sample until ADR-004 batching is available.
     assert.equal(result.checkpointCostPerChannelUnits, SETTLE_COST_UNITS);
     closeTo(result.checkpointTransactionsPerSecond, result.checkpointsPerSecond);
 });

@@ -186,7 +186,7 @@ const PRESET_RAIL: Readonly<
         mode: 'channel-v2',
         scheme: 'mpp',
     },
-    today: { batchSettlementAvailable: false, checkpointBatch: 1, mode: 'channel-v1', scheme: 'none' },
+    today: { batchSettlementAvailable: false, checkpointBatch: 1, mode: 'channel-v1', scheme: 'mpp' },
 };
 
 function normalizeInputs(inputs: ModelInputs): ModelInputs {
@@ -233,8 +233,6 @@ export function resolvePresetScenario(
         mode: rail.mode,
         reclaimBatchSize: 8,
         scheme: rail.scheme,
-        voucherVerifyPerSecond:
-            selection.horizon === 'today' ? Math.min(20_000_000, PRESET_USERS[selection.scale]) : 1_000_000,
     };
     const normalizedInputs = normalizeInputs(inputs);
     const shape = resolvePresetShape(normalizedInputs, demand, selection);
@@ -392,13 +390,13 @@ export function appReducer(state: AppState, action: AppAction): AppState {
             if (mode === state.inputs.mode) return state;
             const enteringChannel = mode !== 'vanilla' && state.inputs.mode === 'vanilla';
             const scheme: SettlementScheme =
-                mode === 'vanilla' ? 'none' : enteringChannel ? 'x402' : state.inputs.scheme;
+                mode === 'vanilla' ? 'none' : enteringChannel ? 'mpp' : state.inputs.scheme;
             return {
                 ...state,
                 inputs: normalizeInputs({
                     ...state.inputs,
                     checkpointBatchSize: enteringChannel
-                        ? X402_CHECKPOINT_DEFAULT_BATCH
+                        ? MPP_CHECKPOINT_DEFAULT_BATCH
                         : state.inputs.checkpointBatchSize,
                     mode,
                     scheme,

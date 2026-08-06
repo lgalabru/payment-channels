@@ -153,7 +153,7 @@ export const TODAY: ModelInputs = {
     openCostUnits: OPEN_COST_UNITS,
     reclaimBatchSize: 8,
     rentPerChannelSol: 0.00471192,
-    scheme: 'none',
+    scheme: 'mpp',
     slotMs: 400,
     transferCostUnits: SPL_TOKEN_TRANSFER_COST_UNITS,
     transferKind: 'spl-token',
@@ -294,8 +294,10 @@ export function evaluateModel(inputs: ModelInputs, demand: DemandInputs): ModelR
         : 0;
     const finalizingBoundariesPerSecond = finalizingBoundarySeconds > 0 ? liveChannels / finalizingBoundarySeconds : 0;
     const checkpointsPerSecond = finalizingBoundariesPerSecond * intermediateCheckpointsPerBoundary;
+    // Without ADR-004 batching, every scheme uses the deployed one-channel settle path.
+    // The MPP cost curve applies only when multi-customer batch settlement is available.
     const checkpointCostPerChannelUnits = checkpointsEnabled
-        ? checkpointCostPerChannel(inputs.scheme, checkpointBatchSize)
+        ? checkpointCostPerChannel(inputs.batchSettlementAvailable ? inputs.scheme : 'x402', checkpointBatchSize)
         : 0;
     const checkpointCostUnitsPerSecond = checkpointsPerSecond * checkpointCostPerChannelUnits;
     const checkpointTransactionsPerSecond = checkpointsPerSecond / checkpointBatchSize;

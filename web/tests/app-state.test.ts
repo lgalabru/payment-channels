@@ -12,33 +12,56 @@ test('default state is the resolved 1M available-today preset', () => {
     assert.equal(state.demand.averageRequestsPerMinutePerUser, 60);
     assert.equal(state.demand.settlementClockSeconds, 300);
     assert.equal(state.inputs.mode, 'channel-v1');
-    assert.equal(state.inputs.scheme, 'none');
+    assert.equal(state.inputs.scheme, 'mpp');
+    assert.equal(state.inputs.voucherVerifyPerSecond, 1_000_000);
     assert.equal(state.inputs.batchSettlementAvailable, false);
     assert.equal(state.inputs.checkpointBatchSize, 1);
     assert.deepEqual(state.activeSimds, []);
     assert.ok(evaluateModel(state.inputs, state.demand).canHandleDemand);
 });
 
-test('the canonical plain-v1 default query reloads as selected while voucher links remain custom', () => {
+test('the canonical MPP default query reloads as selected while x402 links remain custom', () => {
     const canonical = createInitialState('?users=1000000&rpm=60&clock=300&method=v1');
+    const canonicalMpp = createInitialState('?users=1000000&rpm=60&clock=300&method=v1&scheme=mpp');
     const x402 = createInitialState('?users=1000000&rpm=60&clock=300&method=v1&scheme=x402');
     const custom = createInitialState('?users=10000000&rpm=60&clock=3600&method=v1&scheme=x402');
 
     assert.deepEqual(canonical.preset, DEFAULT_PRESET_SELECTION);
-    assert.equal(canonical.inputs.scheme, 'none');
+    assert.equal(canonical.inputs.scheme, 'mpp');
+    assert.deepEqual(canonicalMpp.preset, DEFAULT_PRESET_SELECTION);
+    assert.equal(canonicalMpp.inputs.scheme, 'mpp');
     assert.equal(x402.preset, null);
     assert.equal(x402.inputs.scheme, 'x402');
     assert.equal(custom.preset, null);
 });
 
-test('selecting Available today clears an explicit voucher scheme', () => {
+test('selecting Available today restores MPP without changing verification capacity', () => {
     const sharedX402 = createInitialState('?users=1000000&rpm=60&clock=300&method=v1&scheme=x402');
     const state = appReducer(sharedX402, { patch: { horizon: 'today' }, type: 'select-preset' });
 
     assert.deepEqual(state.preset, DEFAULT_PRESET_SELECTION);
     assert.equal(state.inputs.mode, 'channel-v1');
-    assert.equal(state.inputs.scheme, 'none');
+    assert.equal(state.inputs.scheme, 'mpp');
+    assert.equal(state.inputs.voucherVerifyPerSecond, 1_000_000);
     assert.equal(state.inputs.checkpointBatchSize, 1);
+});
+
+test('scheme and preset events preserve voucher verification capacity', () => {
+    let state = createInitialState();
+    state = appReducer(state, { scheme: 'x402', type: 'select-scheme' });
+    assert.equal(state.inputs.scheme, 'x402');
+    assert.equal(state.inputs.voucherVerifyPerSecond, 1_000_000);
+
+    state = appReducer(state, { key: 'voucherVerifyPerSecond', type: 'update-input', value: 750_000 });
+    state = appReducer(state, { scheme: 'mpp', type: 'select-scheme' });
+    state = appReducer(state, { patch: { horizon: 'today', scale: '10M' }, type: 'select-preset' });
+    assert.equal(state.inputs.scheme, 'mpp');
+    assert.equal(state.inputs.voucherVerifyPerSecond, 750_000);
+
+    state = appReducer(state, { base: 'vanilla', type: 'select-base' });
+    state = appReducer(state, { base: 'v1', type: 'select-base' });
+    assert.equal(state.inputs.scheme, 'mpp');
+    assert.equal(state.inputs.voucherVerifyPerSecond, 750_000);
 });
 
 test('preset toggle sequence is atomic and objectives do not silently change the selected rail', () => {
@@ -56,7 +79,7 @@ test('preset toggle sequence is atomic and objectives do not silently change the
     assert.equal(state.demand.settlementClockSeconds, 300);
     assert.equal(state.preset?.cheapest, false);
     assert.equal(state.preset?.fastest, true);
-    assert.equal(state.inputs.scheme, 'none');
+    assert.equal(state.inputs.scheme, 'mpp');
     assert.ok(state.inputs.checkpointClockSeconds > 0);
     assert.ok(result.enforceableFinalitySeconds < state.demand.settlementClockSeconds);
 });
@@ -92,7 +115,8 @@ test('every preset combination is deterministic, fits, and respects its objectiv
             for (const state of [neutral, cheapest, fastest, both]) {
                 assert.equal(state.inputs.batchSettlementAvailable, horizon === 'longterm');
                 if (horizon === 'today') assert.equal(state.inputs.checkpointBatchSize, 1);
-                assert.equal(state.inputs.scheme, horizon === 'today' ? 'none' : 'mpp');
+                assert.equal(state.inputs.scheme, 'mpp');
+                assert.equal(state.inputs.voucherVerifyPerSecond, 1_000_000);
             }
 
             for (const result of [neutralResult, cheapestResult, fastestResult, bothResult]) {

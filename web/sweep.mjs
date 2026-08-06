@@ -44,6 +44,8 @@ for (const [scale, users] of Object.entries(SCALES)) {
             ...base,
             checkpointBatchSize: 16,
             scheme: 'x402',
+            // This explicit same-throughput comparison provisions x402 verification for the
+            // selected scale. UI scheme and preset events never rewrite the verification knob.
             voucherVerifyPerSecond: users,
         },
         demand,

@@ -1421,10 +1421,10 @@ export function App() {
                 <div className="batch-explainer">
                     <div>
                         <span className="batch-explainer-label">Available today</span>
-                        <strong>MPP and x402 both work</strong>
+                        <strong>MPP · one channel per checkpoint</strong>
                         <p>
-                            Plain v1, x402, and MPP all use the deployed one-channel settlement path. MPP removes the
-                            per-payment client signature check, but it does not yet batch distinct customer channels.
+                            MPP uses the deployed one-channel settlement path and removes the per-payment client
+                            signature check. It does not yet batch distinct customer channels.
                         </p>
                     </div>
                     <div>
