@@ -84,10 +84,6 @@ function settlementLabel(mode: ModelMode, scheme: SettlementScheme): string {
     return scheme === 'none' ? base : `${base} · ${SCHEME_LABELS[scheme]}`;
 }
 
-function formatClock(seconds: number): string {
-    return SETTLEMENT_CLOCK_OPTIONS.find(option => option.value === seconds)?.label ?? `${formatCompact(seconds, 2)}s`;
-}
-
 const BASE_METHODS: readonly { id: BaseMethod; label: string; sub: string }[] = [
     { id: 'vanilla', label: 'Vanilla transfer', sub: 'one on-chain tx / payment' },
     { id: 'v1', label: 'Payment channel v1', sub: 'Deployed · persistent OPEN channels' },
@@ -368,6 +364,7 @@ export function App() {
     const activeScheme = inputs.scheme;
     const pinnedHorizon =
         preset?.horizon === 'longterm' ? 'Long-term' : preset?.horizon === 'today' ? 'Today' : 'Custom';
+    const totalOpexUsdPerDay = (totalOpexUsdPerYear * SECONDS_PER_DAY) / SECONDS_PER_YEAR;
     // The sticky bar is a composited layer in browsers. Remount it when the preset rail changes so
     // its painted text cannot lag behind the already-updated reducer/model state.
     const pinnedScenarioKey = `${pinnedHorizon}:${inputs.mode}:${inputs.scheme}:${activeSimds.join(',')}`;
@@ -1514,47 +1511,17 @@ export function App() {
             </section>
 
             <div
-                aria-label="Operating economics — live summary"
+                aria-label={`Selected payment channel daily operating cost: ${settlementLabel(inputs.mode, inputs.scheme)} ${formatUsd(totalOpexUsdPerDay)} per day`}
                 aria-live="polite"
                 className="opex-sticky"
                 data-horizon={pinnedHorizon}
                 key={pinnedScenarioKey}
             >
-                <div className="opex-sticky-rail">
-                    <div className="opex-sticky-identity">
-                        <span className="opex-sticky-eyebrow">
-                            {pinnedHorizon} · {settlementLabel(inputs.mode, inputs.scheme)}
-                        </span>
-                        <strong className="opex-sticky-label">
-                            Cash {formatClock(demand.settlementClockSeconds)} · Checkpoint{' '}
-                            {formatClock(inputs.checkpointClockSeconds)}
-                        </strong>
-                    </div>
-                    <span className={`opex-sticky-verdict ${canHandleDemand ? 'pass' : 'over'}`}>
-                        {canHandleDemand
-                            ? `Ready for ${formatCompact(logicalRequestsPerSecond, 2)} payments/s`
-                            : `${formatCompact(logicalRequestsPerSecond / Math.max(sustainableCeiling, 1), 2)}× over`}
-                    </span>
-                </div>
-                <div className="opex-sticky-metrics">
-                    <div className="opex-sticky-primary">
-                        <span>All-in annual cost</span>
-                        <strong>{formatUsd(totalOpexUsdPerYear)}/yr</strong>
-                    </div>
-                    <div>
-                        <span>Network fees / year</span>
-                        <strong>{formatUsd(feeUsdPerYear)}</strong>
-                        <small>↓ as cash interval grows</small>
-                    </div>
-                    <div>
-                        <span>Capital carry / year</span>
-                        <strong>{formatUsd(capitalCarryingCostUsdPerYear)}</strong>
-                        <small>↑ as cash interval grows</small>
-                    </div>
-                    <div>
-                        <span>On-chain budget</span>
-                        <strong>{formatPercent(budgetSharePercent)}</strong>
-                    </div>
+                <div className="opex-sticky-core">
+                    <span className="opex-sticky-eyebrow">{settlementLabel(inputs.mode, inputs.scheme)}</span>
+                    <strong className="opex-sticky-cost">
+                        {formatUsd(totalOpexUsdPerDay)} <small>/ day</small>
+                    </strong>
                 </div>
             </div>
 
