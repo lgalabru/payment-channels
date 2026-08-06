@@ -131,6 +131,14 @@ function formatUsd(value: number): string {
     }).format(value);
 }
 
+function formatUsdPerPayment(value: number): string {
+    if (value <= 0) return '$0';
+    if (value >= 0.01) return formatUsd(value);
+
+    const decimals = Math.min(8, Math.max(3, Math.ceil(-Math.log10(value)) + 2));
+    return `$${value.toFixed(decimals)}`;
+}
+
 function RangeKnob({
     disabled = false,
     format = formatInteger,
@@ -1525,6 +1533,10 @@ export function App() {
                     <strong className="opex-sticky-cost">
                         {formatUsd(networkFeeUsdPerSecond * SECONDS_PER_DAY)} <small>/ day</small>
                     </strong>
+                    <small className="opex-sticky-detail">
+                        {formatCompact(logicalRequestsPerSecond * SECONDS_PER_DAY, 2)} logical payments / day ·{' '}
+                        {formatUsdPerPayment(networkFeeUsdPerSecond / Math.max(logicalRequestsPerSecond, 1))} / payment
+                    </small>
                 </div>
             </div>
 

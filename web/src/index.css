@@ -1501,6 +1501,14 @@ footer p {
     white-space: nowrap;
 }
 
+.opex-sticky-detail {
+    color: var(--muted);
+    font-size: 0.62rem;
+    font-variant-numeric: tabular-nums;
+    line-height: 1.2;
+    white-space: nowrap;
+}
+
 @media (max-width: 620px) {
     .opex-sticky {
         bottom: 0;
