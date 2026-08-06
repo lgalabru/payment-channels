@@ -84,7 +84,13 @@ const STANDALONE_RECLAIM_COST_UNITS = 1_661;
 const REARM_COST_UNITS = 19_000; // payee+feepayer sigs, ed25519 voucher, 7 locks, distribute-shape exec + refund leg
 const TOP_UP_COST_UNITS = 10_200; // 720 + 4 locks + 8,267 measured exec
 const SESSION_BOUNDARY_V2_COST_UNITS = REARM_COST_UNITS + TOP_UP_COST_UNITS; // 29,200 per session
-const V2_CHANNEL_OVERHEAD_COST_UNITS = 58_134; // open 36,086 + terminal close ~21,300 + reclaim 748, once per channel life
+// One-time channel build/teardown, paid once per channel life (NOT per session). Over K sessions the
+// channel pays: 1 open + (K−1) rearm+top_up boundaries + 1 terminal close (carries the final voucher) +
+// 1 batched reclaim. This makes v2(K=1) == v1 exactly (zero re-arms occur) and v2 strictly cheaper for
+// K>1. Corrects the earlier flat 58,134/K form, which double-charged the last session for both a re-arm
+// and a terminal close (v2 read worse than v1 at K=1). See PR #81 commit d58ad41 and lifecycleCost().
+const V2_OPEN_COST_UNITS = 36_086;
+const V2_TERMINAL_CLOSE_COST_UNITS = 23_875; // final settle_and_seal + distribute, carries the last voucher
 const USER_STEPS = [0, 1, 10, 100, 1_000, 10_000, 100_000, 1_000_000, 10_000_000, 100_000_000] as const;
 const SETTLEMENT_CLOCK_OPTIONS = [
     { label: 'Disabled', value: 0 },
@@ -339,13 +345,21 @@ function reclaimCostPerChannel(batchSize: number): number {
 
 /** Scheduler cost of one settlement boundary (one session). `sessionsPerChannel` (K) only matters for v2. */
 function lifecycleCost(inputs: ModelInputs, sessionsPerChannel: number): number {
+    const reclaim = reclaimCostPerChannel(inputs.reclaimBatchSize);
     if (inputs.mode === 'channel-v1') {
         // Full teardown/rebuild every session: open + settle_and_seal+distribute + (batched) reclaim.
-        return V1_LIFECYCLE_COST_UNITS - STANDALONE_RECLAIM_COST_UNITS + reclaimCostPerChannel(inputs.reclaimBatchSize);
+        return V1_LIFECYCLE_COST_UNITS - STANDALONE_RECLAIM_COST_UNITS + reclaim;
     }
 
-    // ADR-005: cheap rearm+top_up each session; the channel's open+close+reclaim is paid once per K sessions.
-    return SESSION_BOUNDARY_V2_COST_UNITS + V2_CHANNEL_OVERHEAD_COST_UNITS / Math.max(1, sessionsPerChannel);
+    // ADR-005: over K = sessionsPerChannel sessions the channel pays one open, (K−1) cheap rearm+top_up
+    // boundaries, one terminal close carrying the final voucher, and one batched reclaim:
+    //   [open + (K−1)·boundary + close + reclaim] / K  =  boundary + (open + close + reclaim − boundary)/K
+    // At K=1 this equals v1 exactly (the terminal close replaces the only boundary; zero re-arms occur);
+    // for K>1 it is strictly cheaper. Reclaim stays batch-dependent so the K=1 == v1 invariant holds for
+    // every reclaim-batch value, not just the observed 8.
+    const channelOnceOffOverhead =
+        V2_OPEN_COST_UNITS + V2_TERMINAL_CLOSE_COST_UNITS + reclaim - SESSION_BOUNDARY_V2_COST_UNITS;
+    return SESSION_BOUNDARY_V2_COST_UNITS + channelOnceOffOverhead / Math.max(1, sessionsPerChannel);
 }
 
 type ArrivingDemandKey = 'averageRequestsPerMinutePerUser' | 'users';
@@ -473,6 +487,10 @@ export function App() {
     const isChannel = inputs.mode !== 'vanilla';
     const logicalRequestsPerSecond = arrivingRequestsPerSecond(demand);
     const settlementClockEnabled = demand.settlementClockSeconds > 0;
+    // Offer only lifetimes ≥ the active settlement clock — a channel can't be shorter than one session.
+    const channelLifetimeOptions = settlementClockEnabled
+        ? CHANNEL_LIFETIME_OPTIONS.filter(option => option.value >= demand.settlementClockSeconds)
+        : CHANNEL_LIFETIME_OPTIONS;
     // One channel = one session. It accumulates cumulative vouchers off-chain, then makes exactly ONE
     // on-chain settle_and_seal + distribute when the session idle-closes — this is how MPP `session` and
     // x402 `upto` actually settle (see the program lifecycle). So payments-per-channel is DERIVED from the
@@ -596,6 +614,21 @@ export function App() {
         setDemand(previous => clampArrivingDemand(previous, key, value));
     };
 
+    // A channel cannot be shorter than one of its own sessions, so raising the settlement clock past the
+    // current channel lifetime bumps the lifetime up to the smallest option that still contains the clock.
+    // Keeps K ≥ 1 meaningful and makes the K=1 corner reachable only at lifetime == clock (where v2 == v1).
+    const updateSettlementClock = (clockSeconds: number) => {
+        setDemand(previous => {
+            if (clockSeconds > 0 && previous.channelLifetimeSeconds < clockSeconds) {
+                const bumped = CHANNEL_LIFETIME_OPTIONS.find(option => option.value >= clockSeconds);
+                if (bumped) {
+                    return { ...previous, channelLifetimeSeconds: bumped.value, settlementClockSeconds: clockSeconds };
+                }
+            }
+            return { ...previous, settlementClockSeconds: clockSeconds };
+        });
+    };
+
     const selectPhase = (phase: Phase) => {
         setInputs(previous => ({ ...previous, ...phase.inputs }));
         setSelectedPhaseId(phase.id);
@@ -714,7 +747,7 @@ export function App() {
                         disabled={inputs.mode === 'vanilla'}
                         help="Session window: how long a channel batches vouchers before its single settle + close. Disabled settles every voucher on-chain."
                         label="Batch settlement clock"
-                        onChange={value => updateDemand('settlementClockSeconds', value)}
+                        onChange={updateSettlementClock}
                         options={SETTLEMENT_CLOCK_OPTIONS}
                         value={demand.settlementClockSeconds}
                     />
@@ -947,7 +980,7 @@ export function App() {
                                         help="ADR-005: how long a channel stays open across sessions before a real teardown"
                                         label="Channel lifetime"
                                         onChange={value => updateDemand('channelLifetimeSeconds', value)}
-                                        options={CHANNEL_LIFETIME_OPTIONS}
+                                        options={channelLifetimeOptions}
                                         value={demand.channelLifetimeSeconds}
                                     />
                                 )}
@@ -1244,7 +1277,7 @@ export function App() {
             <footer>
                 <p>
                     Mainnet scheduler costs: SPL Token 1,911 · Token-2022 6,536 · channel v1 lifecycle 61,622. Channel
-                    v2 remains an ADR-004 planning envelope until implemented and benchmarked.
+                    v2 remains an ADR-005 planning envelope until implemented and benchmarked.
                 </p>
             </footer>
         </main>
