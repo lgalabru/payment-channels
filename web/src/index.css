@@ -174,7 +174,7 @@ h1 {
 .simd-grid {
     display: grid;
     gap: 8px;
-    grid-template-columns: repeat(auto-fill, minmax(228px, 1fr));
+    grid-template-columns: repeat(auto-fill, minmax(216px, 1fr));
     margin-bottom: 14px;
 }
 
@@ -182,11 +182,10 @@ h1 {
     background: rgba(17, 17, 17, 0.72);
     border: 1px solid var(--border);
     border-radius: 8px;
-    cursor: pointer;
     display: flex;
     flex-direction: column;
-    gap: 5px;
-    padding: 12px 13px;
+    gap: 4px;
+    padding: 10px 12px;
     transition: border-color 0.12s ease, background 0.12s ease;
 }
 
@@ -211,8 +210,18 @@ h1 {
 
 .simd-card-top input {
     accent-color: var(--accent);
+    cursor: pointer;
     height: 15px;
     margin: 0;
+    width: 15px;
+}
+
+.simd-shipped {
+    color: var(--accent);
+    font-size: 0.9rem;
+    font-weight: 700;
+    line-height: 15px;
+    text-align: center;
     width: 15px;
 }
 
@@ -265,7 +274,17 @@ h1 {
 .simd-card small {
     color: var(--muted);
     font-size: 0.74rem;
-    line-height: 1.4;
+    line-height: 1.3;
+}
+
+.simd-card small a {
+    color: inherit;
+    text-decoration-color: var(--border-strong);
+    text-underline-offset: 2px;
+}
+
+.simd-card small a:hover {
+    color: var(--text);
 }
 
 .section-heading,

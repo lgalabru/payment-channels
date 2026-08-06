@@ -193,16 +193,27 @@ const BASELINE_SIMD_PARAMS: SimdParams = {
 interface Simd {
     readonly id: string;
     readonly code: string;
+    readonly href: string;
     readonly label: string;
     readonly est: string;
     readonly status: string;
     readonly moves: string;
     readonly note: string;
     readonly warn?: boolean;
-    readonly apply: (params: SimdParams) => SimdParams;
+    readonly apply?: (params: SimdParams) => SimdParams;
 }
 
 const SIMDS: readonly Simd[] = [
+    {
+        code: 'SIMD-0266',
+        est: 'shipped · Apr 2026',
+        href: 'https://github.com/solana-program/token/tree/main/p-token',
+        id: 'p-token',
+        label: 'p-token',
+        moves: 'precedent',
+        note: 'Shipped precedent: proposal to mainnet in ~13 months.',
+        status: 'Shipped',
+    },
     {
         apply: params => ({
             ...params,
@@ -211,20 +222,22 @@ const SIMDS: readonly Simd[] = [
         }),
         code: 'SIMD-0567',
         est: '~mid-2027',
+        href: 'https://github.com/solana-foundation/solana-improvement-documents/pull/567',
         id: 'p-ata',
         label: 'p-ATA',
         moves: 'open cost · availability',
-        note: 'Pinocchio ATA rewrite at the same address: Create 22,940 → 4,171 CU, so open drops 36,086 → ~17,300 and v1 lifecycle ~−31%. Projects ~10% cluster-wide CU headroom (availability ticks up). The one filed proposal that moves this page’s verdicts.',
+        note: 'ATA Create 22.9k → 4.2k CU; channel open cost drops ~52%.',
         status: 'Review',
     },
     {
         apply: params => ({ ...params, voucherSigFeeRemoved: true }),
         code: 'SIMD-0568',
         est: 'after 0565 + migration',
+        href: 'https://github.com/solana-foundation/solana-improvement-documents/pull/568',
         id: 'precompile',
         label: 'Precompile removal',
         moves: 'fees · packing',
-        note: 'Removes the ed25519 precompile: the voucher-settle signature fee halves (10,000 → 5,000 lamports/settle) and the 162-byte ed25519 instruction leaves every settle (naive packing ~2×). ⚠ Mandatory program migration to in-program verify — the only item here that can break the deployed program, not just improve it.',
+        note: 'Cuts voucher fee 10k → 5k lamports; requires migration.',
         status: 'Review',
         warn: true,
     },
@@ -232,20 +245,11 @@ const SIMDS: readonly Simd[] = [
         apply: params => ({ ...params, largeTx: true }),
         code: 'SIMD-0296 / 0385',
         est: 'Q3 2026 target',
+        href: 'https://github.com/solana-foundation/solana-improvement-documents/blob/main/proposals/0296-larger-transactions.md',
         id: 'large-tx',
         label: '4kB transactions',
         moves: 'packing',
-        note: 'Raw 4kB txs over QUIC / Transaction V1: x402 checkpoint packing 5 → 16/tx; ADR-004 59 → 60 (account-bound). A packing multiplier, not a CU/s multiplier — gates the x402 batch knob so the today-preset can’t claim Q3 packing.',
-        status: 'Review',
-    },
-    {
-        apply: params => ({ ...params, availableCapacityPercent: Math.min(100, params.availableCapacityPercent + 2) }),
-        code: 'SIMD-0326',
-        est: 'Agave 4.3 target',
-        id: 'alpenglow',
-        label: 'Alpenglow',
-        moves: 'latency · small availability',
-        note: '~150ms finality; vote transactions leave the blocks (low-single-digit % of block CUs). A latency/finality phase with a small availability bump, not a capacity multiplier.',
+        note: 'Lets x402 pack 5 → 16 settles per checkpoint.',
         status: 'Review',
     },
 ];
@@ -801,7 +805,7 @@ export function App() {
     const toggleSimd = (id: string) => {
         const next = activeSimds.includes(id) ? activeSimds.filter(other => other !== id) : [...activeSimds, id];
         const params = SIMDS.reduce<SimdParams>(
-            (accumulated, simd) => (next.includes(simd.id) ? simd.apply(accumulated) : accumulated),
+            (accumulated, simd) => (next.includes(simd.id) && simd.apply ? simd.apply(accumulated) : accumulated),
             { ...BASELINE_SIMD_PARAMS },
         );
         setActiveSimds(next);
@@ -882,17 +886,29 @@ export function App() {
                 <div className="section-heading">
                     <div>
                         <p className="section-index">01</p>
-                        <h2 id="timeline-title">Upgrade timeline</h2>
+                        <h2 id="timeline-title">Relevant Upgrade timeline</h2>
                     </div>
-                    <p>Toggle SIMDs currently in review — they stack. Each moves a specific knob below.</p>
+                    <p>Shipped precedent + SIMDs in review. Toggle the modeled deltas.</p>
                 </div>
                 <div className="simd-grid">
                     {SIMDS.map(simd => {
                         const on = activeSimds.includes(simd.id);
+                        const isToggle = simd.apply !== undefined;
                         return (
-                            <label className={`simd-card ${on ? 'simd-on' : ''} ${simd.warn ? 'simd-warn' : ''}`} key={simd.id}>
+                            <div className={`simd-card ${on ? 'simd-on' : ''} ${simd.warn ? 'simd-warn' : ''}`} key={simd.id}>
                                 <span className="simd-card-top">
-                                    <input checked={on} onChange={() => toggleSimd(simd.id)} type="checkbox" />
+                                    {isToggle ? (
+                                        <input
+                                            aria-label={`Toggle ${simd.label}`}
+                                            checked={on}
+                                            onChange={() => toggleSimd(simd.id)}
+                                            type="checkbox"
+                                        />
+                                    ) : (
+                                        <span aria-label="Shipped" className="simd-shipped" role="img">
+                                            ✓
+                                        </span>
+                                    )}
                                     <span className="simd-code">{simd.code}</span>
                                     <span className="simd-status">{simd.status}</span>
                                 </span>
@@ -900,8 +916,13 @@ export function App() {
                                 <span className="simd-moves">
                                     {simd.moves} · {simd.est}
                                 </span>
-                                <small>{simd.note}</small>
-                            </label>
+                                <small>
+                                    {simd.note}{' '}
+                                    <a href={simd.href} rel="noopener noreferrer" target="_blank">
+                                        Details ↗
+                                    </a>
+                                </small>
+                            </div>
                         );
                     })}
                 </div>
@@ -923,7 +944,7 @@ export function App() {
                         </strong>
                     </div>
                     <p>
-                        No filed SIMD raises CU/s past ~250M — every gain here cuts per-operation cost, not the block
+                        No reviewed proposal raises CU/s past ~250M — every gain here cuts per-operation cost, not the block
                         ceiling. If a 150M/200M-block proposal appears it multiplies every ceiling on this page
                         linearly; that is the number to watch the SIMD repo for.
                     </p>
