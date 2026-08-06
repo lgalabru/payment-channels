@@ -1,6 +1,6 @@
 import { useEffect, useId, useState } from 'react';
 
-type ModelMode = 'vanilla' | 'channel-v1' | 'channel-v2';
+type ModelMode = 'vanilla' | 'channel-v1' | 'channel-v2' | 'x402-batch' | 'mpp-operator';
 type TransferKind = 'spl-token' | 'token-2022';
 
 interface ModelInputs {
@@ -195,9 +195,32 @@ const PHASES: readonly Phase[] = [
 const MODE_LABELS: Readonly<Record<ModelMode, string>> = {
     'channel-v1': 'Payment channel v1',
     'channel-v2': 'Payment channel v2 (ADR-005 re-arm)',
+    'mpp-operator': 'MPP voucher (operator-signed)',
     vanilla: 'Vanilla transfer',
+    'x402-batch': 'x402 batch settlement',
 };
-const MODE_ORDER: readonly ModelMode[] = ['vanilla', 'channel-v1', 'channel-v2'];
+const MODE_SUBTITLES: Readonly<Record<ModelMode, string>> = {
+    'channel-v1': 'open + close every session',
+    'channel-v2': 'persistent channel, re-arm per session',
+    'mpp-operator': 'operator-signed — no per-payment verify',
+    vanilla: 'one on-chain tx / payment',
+    'x402-batch': 'client-signed vouchers, batched',
+};
+const MODE_ORDER: readonly ModelMode[] = ['vanilla', 'channel-v1', 'channel-v2', 'x402-batch', 'mpp-operator'];
+
+// x402 batch and MPP operator-signed both settle on-chain like v2 (persistent channel, ADR-005 re-arm);
+// they differ only in the OFF-CHAIN voucher plane, below.
+const PERSISTENT_CHANNEL_MODES: readonly ModelMode[] = ['channel-v2', 'x402-batch', 'mpp-operator'];
+function isPersistentChannel(mode: ModelMode): boolean {
+    return PERSISTENT_CHANNEL_MODES.includes(mode);
+}
+// Client-signed modes need one Ed25519 voucher verified per payment (the off-chain fleet). MPP
+// operator-signed mode (mpp-specs #309) inverts this: the operator holds authorizedSigner and signs the
+// cumulative vouchers itself, while the client authenticates each request with a reusable bearer proof —
+// so there is no per-payment client signature to verify. Vanilla carries no vouchers at all.
+function requiresPerPaymentVerify(mode: ModelMode): boolean {
+    return mode === 'channel-v1' || mode === 'channel-v2' || mode === 'x402-batch';
+}
 
 function formatCompact(value: number, decimals = 1): string {
     return new Intl.NumberFormat('en-US', {
@@ -398,14 +421,18 @@ function clampArrivingDemand(previous: DemandInputs, key: ArrivingDemandKey, pro
 
 /** Interactive capacity model backed by the report's measured scheduler costs. */
 const QUERY_TO_MODE: Readonly<Record<string, ModelMode>> = {
+    mpp: 'mpp-operator',
     v1: 'channel-v1',
     v2: 'channel-v2',
     vanilla: 'vanilla',
+    x402: 'x402-batch',
 };
 const MODE_TO_QUERY: Readonly<Record<ModelMode, string>> = {
     'channel-v1': 'v1',
     'channel-v2': 'v2',
+    'mpp-operator': 'mpp',
     vanilla: 'vanilla',
+    'x402-batch': 'x402',
 };
 
 /** Snap an arbitrary user count to the nearest discrete slider step. */
@@ -522,7 +549,8 @@ export function App() {
     const maximumPaymentsPerSecond = costPerLogicalPayment > 0 ? availableBudgetPerSecond / costPerLogicalPayment : 0;
     // Off-chain voucher plane: every logical payment is a voucher the session service must Ed25519-verify.
     // Vanilla transfers carry no vouchers, so only the on-chain ceiling applies there.
-    const voucherVerifyCeiling = isChannel ? inputs.voucherVerifyPerSecond : Infinity;
+    const perPaymentVerify = requiresPerPaymentVerify(inputs.mode);
+    const voucherVerifyCeiling = perPaymentVerify ? inputs.voucherVerifyPerSecond : Infinity;
     // A path sustains only as fast as its tightest stage: on-chain execution or off-chain verification.
     const sustainableCeiling = Math.min(maximumPaymentsPerSecond, voucherVerifyCeiling);
     const progressPercent = Math.min(100, (logicalRequestsPerSecond / TARGET_PAYMENTS_PER_SECOND) * 100);
@@ -530,7 +558,7 @@ export function App() {
     const processedRequestsPerSecond = Math.min(logicalRequestsPerSecond, sustainableCeiling);
     const processedPercent = Math.min(100, (processedRequestsPerSecond / TARGET_PAYMENTS_PER_SECOND) * 100);
     const droppedRequestsPerSecond = Math.max(0, logicalRequestsPerSecond - processedRequestsPerSecond);
-    const voucherVerifyBinds = isChannel && voucherVerifyCeiling < maximumPaymentsPerSecond;
+    const voucherVerifyBinds = perPaymentVerify && voucherVerifyCeiling < maximumPaymentsPerSecond;
     const bindingConstraint =
         droppedRequestsPerSecond <= 0
             ? 'none'
@@ -547,7 +575,9 @@ export function App() {
     const channelLifecyclesPerSecond = sessionsPerSecond;
     const settlementsPerSecond = sessionsPerSecond;
     // Channel builds+teardowns per second: every session in v1; once per K sessions with ADR-005 re-arm.
-    const channelBuildsPerSecond = inputs.mode === 'channel-v2' ? sessionsPerSecond / sessionsPerChannel : sessionsPerSecond;
+    const channelBuildsPerSecond = isPersistentChannel(inputs.mode)
+        ? sessionsPerSecond / sessionsPerChannel
+        : sessionsPerSecond;
     const physicalTransactionsPerSecond = !isChannel
         ? logicalRequestsPerSecond
         : inputs.mode === 'channel-v1'
@@ -766,13 +796,7 @@ export function App() {
                             type="button"
                         >
                             <span>{MODE_LABELS[mode]}</span>
-                            <small>
-                                {mode === 'vanilla'
-                                    ? 'one on-chain tx / payment'
-                                    : mode === 'channel-v1'
-                                      ? 'open + close every session'
-                                      : 'persistent channel, re-arm per session'}
-                            </small>
+                            <small>{MODE_SUBTITLES[mode]}</small>
                         </button>
                     ))}
                 </div>
@@ -830,16 +854,31 @@ export function App() {
                         {isChannel ? ` at ${formatInteger(paymentsPerChannel)} payments/channel` : ''}.
                     </small>
                 </div>
-                {isChannel && (
+                {isChannel && perPaymentVerify && (
                     <div className="capacity-equation">
                         <span>Voucher plane</span>
                         <strong>{formatCompact(voucherVerifyCeiling, 2)} Ed25519 verifications/s</strong>
                         <small>
-                            Each logical payment is one voucher the session service verifies off-chain. This caps
-                            sustained requests independently of the on-chain budget, and does not move with settlement
-                            batching or payments/channel — so with heavy on-chain amortization it becomes the binding
-                            limit. Sustained throughput = {formatCompact(sustainableCeiling, 2)} req/s (min of the two
-                            ceilings).
+                            Client-signed: each logical payment is one voucher the session service verifies off-chain.
+                            This caps sustained requests independently of the on-chain budget, and does not move with
+                            settlement batching or payments/channel — so with heavy on-chain amortization it becomes the
+                            binding limit. Sustained throughput = {formatCompact(sustainableCeiling, 2)} req/s (min of the
+                            two ceilings).
+                        </small>
+                    </div>
+                )}
+                {inputs.mode === 'mpp-operator' && (
+                    <div className="capacity-equation">
+                        <span>Voucher plane</span>
+                        <strong>operator-signed — no per-payment verify</strong>
+                        <small>
+                            MPP operator-signed mode (mpp-specs #309): the operator holds the channel&rsquo;s
+                            authorizedSigner and signs the cumulative voucher itself, so there is no client Ed25519 to
+                            verify per request. Per-request auth is a reusable bearer proof (a cheap symmetric check),
+                            and the operator signs just one voucher per settlement (~{formatCompact(settlementsPerSecond, 2)}/s).
+                            The off-chain Ed25519 fleet no longer binds — the ceiling reverts to the on-chain budget.
+                            Trade-off: the client trusts the operator&rsquo;s metering, bounded by the escrow deposit,
+                            rather than authorizing each increment with its own signature.
                         </small>
                     </div>
                 )}
@@ -875,9 +914,11 @@ export function App() {
                     </strong>
                     <span>
                         On-chain uses {formatPercent(budgetSharePercent)} of the available scheduler budget
-                        {isChannel
+                        {perPaymentVerify
                             ? `; off-chain uses ${formatPercent(voucherVerifySharePercent)} of the ${formatCompact(voucherVerifyCeiling, 2)} vouchers/s Ed25519 budget`
-                            : ''}
+                            : inputs.mode === 'mpp-operator'
+                              ? '; off-chain has no per-payment verification (operator-signed)'
+                              : ''}
                         .
                     </span>
                 </div>
@@ -975,7 +1016,7 @@ export function App() {
                                     step={0.000000001}
                                     value={inputs.rentPerChannelSol}
                                 />
-                                {inputs.mode === 'channel-v2' && (
+                                {isPersistentChannel(inputs.mode) && (
                                     <SelectKnob
                                         help="ADR-005: how long a channel stays open across sessions before a real teardown"
                                         label="Channel lifetime"
@@ -1001,18 +1042,18 @@ export function App() {
                                                 : '∞'}
                                         </strong>
                                     </div>
-                                    {inputs.mode === 'channel-v2' && (
+                                    {isPersistentChannel(inputs.mode) && (
                                         <div>
                                             <span>Sessions / channel (K)</span>
                                             <strong>{formatCompact(sessionsPerChannel, 2)}</strong>
                                         </div>
                                     )}
                                     <div>
-                                        <span>{inputs.mode === 'channel-v2' ? 'Channel builds+teardowns' : 'Channel opens+closes'}</span>
+                                        <span>{isPersistentChannel(inputs.mode) ? 'Channel builds+teardowns' : 'Channel opens+closes'}</span>
                                         <strong>{formatCompact(channelBuildsPerSecond, 2)} / second</strong>
                                     </div>
                                     <div>
-                                        <span>{inputs.mode === 'channel-v2' ? 'Re-arm rate' : 'Settlement rate'}</span>
+                                        <span>{isPersistentChannel(inputs.mode) ? 'Re-arm rate' : 'Settlement rate'}</span>
                                         <strong>{formatCompact(settlementsPerSecond, 2)} / second</strong>
                                     </div>
                                     <div>
@@ -1035,7 +1076,7 @@ export function App() {
                                     value={inputs.reclaimBatchSize}
                                 />
                                 <div className="batch-table">
-                                    {inputs.mode === 'channel-v2' ? (
+                                    {isPersistentChannel(inputs.mode) ? (
                                         <>
                                             <div>
                                                 <span>Re-arm</span>
@@ -1063,7 +1104,7 @@ export function App() {
                                         </>
                                     )}
                                     <div>
-                                        <span>{inputs.mode === 'channel-v2' ? 'Boundary cost / session' : 'Lifecycle cost'}</span>
+                                        <span>{isPersistentChannel(inputs.mode) ? 'Boundary cost / session' : 'Lifecycle cost'}</span>
                                         <strong>{formatInteger(costPerLifecycle)} units / channel</strong>
                                     </div>
                                 </div>
@@ -1077,6 +1118,7 @@ export function App() {
                             <div className="knob-card">
                                 <h3>Off-chain voucher plane</h3>
                                 <RangeKnob
+                                    disabled={!perPaymentVerify}
                                     format={value => `${formatCompact(value)} / s`}
                                     help="Aggregate Ed25519 verify rate — a horizontally scalable fleet, not a protocol limit (~50–100k/s/core batched; 10M/s ≈ a 100–200 core fleet)"
                                     label="Voucher verification rate"
@@ -1088,12 +1130,14 @@ export function App() {
                                 />
                                 <div className="batch-table">
                                     <div>
-                                        <span>Verification load</span>
-                                        <strong>{formatCompact(logicalRequestsPerSecond, 2)} / second</strong>
+                                        <span>{perPaymentVerify ? 'Verification load' : 'Operator signing load'}</span>
+                                        <strong>
+                                            {formatCompact(perPaymentVerify ? logicalRequestsPerSecond : settlementsPerSecond, 2)} / second
+                                        </strong>
                                     </div>
                                     <div>
                                         <span>Verify budget used</span>
-                                        <strong>{formatPercent(voucherVerifySharePercent)}</strong>
+                                        <strong>{perPaymentVerify ? formatPercent(voucherVerifySharePercent) : 'n/a'}</strong>
                                     </div>
                                     <div>
                                         <span>Binding constraint</span>
@@ -1103,10 +1147,9 @@ export function App() {
                                     </div>
                                 </div>
                                 <p className="batch-caveat">
-                                    One Ed25519 verification per incoming voucher, so hitting the target means sustaining
-                                    that many voucher verifications/s off-chain — the report&rsquo;s #1 remaining-work item.
-                                    Unlike settlement batching or payments/channel this does not amortize, so at high
-                                    on-chain amortization it becomes the real limiter; scale it by adding verifier cores.
+                                    {perPaymentVerify
+                                        ? 'One Ed25519 verification per incoming voucher, so hitting the target means sustaining that many voucher verifications/s off-chain — the report’s #1 remaining-work item. Unlike settlement batching or payments/channel this does not amortize, so at high on-chain amortization it becomes the real limiter; scale it by adding verifier cores.'
+                                        : 'Operator-signed (mpp-specs #309): the operator signs cumulative vouchers, so there is no per-payment client Ed25519 to verify — this whole plane collapses from one verify per payment to one operator sign per settlement plus a cheap bearer-proof check per request. It stops being the limiter; the binding constraint reverts to the on-chain budget. The cost is trust: the client relies on the operator’s metering, bounded by the escrow deposit, instead of signing each increment itself.'}
                                 </p>
                             </div>
                         </>

@@ -314,7 +314,7 @@ h1 {
     border-radius: 10px;
     display: grid;
     gap: 4px;
-    grid-template-columns: repeat(3, 1fr);
+    grid-template-columns: repeat(5, 1fr);
     margin-bottom: 24px;
     padding: 4px;
 }
