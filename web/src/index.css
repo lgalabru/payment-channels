@@ -656,7 +656,7 @@ input[type='range'] {
 }
 
 .opex-controls {
-    grid-template-columns: repeat(4, 1fr);
+    grid-template-columns: repeat(5, 1fr);
     margin: 8px 0 20px;
 }
 

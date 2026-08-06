@@ -70,7 +70,12 @@ function evalShape(cfg){
   const workingCapUsd = rentCapUsd+escrowFloatUsd;
   const carryPerYear = workingCapUsd*(capitalPct/100);
   const feePerYear = feeUsdPerSec*YEAR;
-  const totalOpexPerYear = feePerYear+carryPerYear;
+  // Off-chain verify fleet (placeholder $/M): client-signed planes verify one Ed25519 per accepted
+  // payment; MPP operator-signed and vanilla pay $0. Sized on processed (accepted) payments.
+  const processed = Math.min(logicalRPS,sustainable);
+  const verifiesPerSec = perPaymentVerify?processed:0;
+  const verifyPerYear = verifiesPerSec/1e6*(cfg.verifyCostPerMillion??0)*YEAR;
+  const totalOpexPerYear = feePerYear+verifyPerYear+carryPerYear;
   const allInBps = grossPerSec>0?totalOpexPerYear/(grossPerSec*YEAR)*10000:0;
   // finality
   const required = logicalRPS*costPerPayment+ckCostPerSec;
@@ -79,14 +84,14 @@ function evalShape(cfg){
   const settleLatency = isChannel?(isFinite(enforceableFinality)?enforceableFinality:0)*Math.max(1,backlog):Math.max(1,backlog)/Math.max(bps,0.001);
   const budgetShare = available>0?required/available*100:0;
   return {fits,maxPayments,sustainable,logicalRPS,costPerPayment,allInBps,totalOpexPerYear,
-    settleLatency,budgetShare,physTxPerSec,escrowFloatUsd,carryPerYear,feePerYear,backlog,K,paymentsPerChannel,ckCostPerSec};
+    settleLatency,budgetShare,physTxPerSec,escrowFloatUsd,carryPerYear,feePerYear,verifyPerYear,backlog,K,paymentsPerChannel,ckCostPerSec};
 }
 
 const HORIZON = {
   today:{mode:'v1',scheme:'x402',capacity:50,block:100_000_000,slotMs:400,open:36_086,voucherSigFeeRemoved:false,largeTx:false,checkpointBatch:5},
   longterm:{mode:'v2',scheme:'mpp',capacity:55,block:100_000_000,slotMs:400,open:17_300,voucherSigFeeRemoved:true,largeTx:true,checkpointBatch:59},
 };
-const base = {rpm:60,reclaimBatch:8,channelLifetime:604800,txnValue:0.05,solPrice:80,capitalPct:8,priority:0,rentPerChannelSol:0.00471192};
+const base = {rpm:60,reclaimBatch:8,channelLifetime:604800,txnValue:0.05,solPrice:80,capitalPct:8,priority:0,rentPerChannelSol:0.00471192,verifyCostPerMillion:0.02};
 
 function cfgFor(scale,horizon,clock,checkpointClock){
   const h=HORIZON[horizon];
@@ -128,4 +133,30 @@ for(const scale of ['1M','10M']){
     console.log(fmt('01 (fastest) ',shortest,cc01,r01));
     console.log(fmt('11 (both)    ',cheapest,cc11,r11));
   }
+}
+
+// --- MPP vs x402: ludo's claim, cheaper AND faster (v2 base, each scheme its real batch cap) ---
+// With the off-chain verify penalty priced, MPP wins on cost (verify=$0 + cheaper checkpoints) and on
+// speed (its cheaper checkpoints let a faster enforceable cadence fit the same budget).
+console.log('\n=== MPP vs x402 (v2 base) ===');
+const lt = HORIZON.longterm;
+const mk = (users,scheme,batch,clock,checkpointClock)=>evalShape(
+  {...base,...lt,scheme,checkpointBatch:batch,users,clock,checkpointClock,voucherVerify:Math.min(20_000_000,users)});
+const line=(l,r)=>`  ${l}: fit=${r.fits} finality=${r.settleLatency.toFixed(0)}s allIn=${r.allInBps.toFixed(3)}bps `+
+  `opex=$${(r.totalOpexPerYear/1e6).toFixed(2)}M (fee $${(r.feePerYear/1e6).toFixed(2)}M + verify $${(r.verifyPerYear/1e6).toFixed(2)}M + carry $${(r.carryPerYear/1e6).toFixed(2)}M)`;
+const fastestFitting=(users,scheme,batch,clock)=>{ for(const cc of CHECKPOINTS){ if(mk(users,scheme,batch,clock,cc).fits) return cc; } return 0; };
+for(const scale of ['1M','10M']){
+  const users = scale==='10M'?10_000_000:1_000_000;
+  const clock = 3600; // 1h cash-sweep (cheapest-ish window), same for both
+  console.log(`\n### ${scale}`);
+  // (a) CHEAPER — no checkpoints, so finality = window for both; isolates verify + base-fee gap.
+  const mppC=mk(users,'mpp',59,clock,0), x402C=mk(users,'x402',16,clock,0);
+  console.log('cheaper (no checkpoints, finality = window):');
+  console.log(line('MPP ',mppC)); console.log(line('x402',x402C));
+  console.log(`  => MPP cheaper by $${((x402C.totalOpexPerYear-mppC.totalOpexPerYear)/1e6).toFixed(2)}M/yr; x402 verify burn = $${(x402C.verifyPerYear/1e6).toFixed(2)}M/yr`);
+  // (b) FASTER — fastest enforceable cadence each scheme can fit on the same budget.
+  const ccMpp=fastestFitting(users,'mpp',59,clock), ccX=fastestFitting(users,'x402',16,clock);
+  console.log('faster (fastest enforceable checkpoint each can fit):');
+  console.log(line(`MPP  ck=${ccMpp}s`,mk(users,'mpp',59,clock,ccMpp)));
+  console.log(line(`x402 ck=${ccX}s`,mk(users,'x402',16,clock,ccX)));
 }

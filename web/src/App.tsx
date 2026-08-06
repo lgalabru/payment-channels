@@ -46,6 +46,12 @@ interface DemandInputs {
     settlementClockSeconds: number;
     solPriceUsd: number;
     users: number;
+    // Placeholder penalty for the OFF-CHAIN verify fleet: $ per million client Ed25519 voucher
+    // verifications. There is no benchmark yet, so this is a dial, not a measurement. It prices the
+    // per-payment hot-path a client-signed rail must run (parse voucher + verify sig + check watermark
+    // + persist), including HA/headroom. Only client-signed planes pay it — plain channels and x402;
+    // MPP operator-signed and vanilla have no per-payment client signature to verify, so it is $0 there.
+    voucherVerifyCostUsdPerMillion: number;
 }
 
 interface RangeKnobProps {
@@ -162,6 +168,9 @@ const DEFAULT_DEMAND: DemandInputs = {
     settlementClockSeconds: 60,
     solPriceUsd: 80,
     users: 10_000_000,
+    // ~$0.02 / million verified vouchers. Placeholder for a full hot-path verify handler + HA on cloud
+    // vCPU; the honest band spans ~$0.002 (bare batch Ed25519 verify) to ~$0.05 (fat handler + headroom).
+    voucherVerifyCostUsdPerMillion: 0.02,
 };
 
 const TODAY: ModelInputs = {
@@ -849,9 +858,19 @@ export function App() {
     const workingCapitalUsd = rentWorkingCapitalUsd + escrowFloatUsd;
     const capitalCarryingCostUsdPerYear = workingCapitalUsd * (demand.capitalCostAnnualPercent / 100);
 
-    // All-in operating cost: fees (a burn) + the carrying cost of the refundable capital held in the rail.
+    // Off-chain verify fleet: a placeholder compute penalty the client-signed planes pay OFF-chain, one
+    // Ed25519 voucher verification per accepted payment (plain channel + x402). MPP operator-signed and
+    // vanilla have no per-payment client signature, so this whole plane is $0 for them — that asymmetry is
+    // exactly what makes MPP cheaper at equal on-chain shape. Sized on processed (accepted) payments, since
+    // dropped requests are never verified. Priced from the $/million dial (no benchmark yet).
+    const voucherVerifiesPerSecond = perPaymentVerify ? processedRequestsPerSecond : 0;
+    const verifyComputeUsdPerSecond = (voucherVerifiesPerSecond / 1_000_000) * demand.voucherVerifyCostUsdPerMillion;
+    const verifyComputeUsdPerYear = verifyComputeUsdPerSecond * SECONDS_PER_YEAR;
+
+    // All-in operating cost: fees (a burn) + the off-chain verify fleet (a burn) + the carrying cost of the
+    // refundable capital held in the rail.
     const feeUsdPerYear = networkFeeUsdPerSecond * SECONDS_PER_YEAR;
-    const totalOpexUsdPerYear = feeUsdPerYear + capitalCarryingCostUsdPerYear;
+    const totalOpexUsdPerYear = feeUsdPerYear + verifyComputeUsdPerYear + capitalCarryingCostUsdPerYear;
     const allInTakeRateBps =
         grossValuePerSecondUsd > 0 ? (totalOpexUsdPerYear / (grossValuePerSecondUsd * SECONDS_PER_YEAR)) * 10_000 : 0;
 
@@ -1790,6 +1809,16 @@ export function App() {
                         step={0.5}
                         value={demand.capitalCostAnnualPercent}
                     />
+                    <RangeKnob
+                        format={value => `$${value.toFixed(3)} / M`}
+                        help="Placeholder — no benchmark yet. Off-chain cost to verify one client Ed25519 voucher per payment (parse + verify + watermark + persist, incl. HA), $ per million. Band ≈ $0.002 (bare batch verify) to $0.05 (fat handler). Applies to plain channels + x402; MPP and vanilla pay $0."
+                        label="Off-chain verify penalty"
+                        max={0.1}
+                        min={0}
+                        onChange={value => updateDemand('voucherVerifyCostUsdPerMillion', value)}
+                        step={0.005}
+                        value={demand.voucherVerifyCostUsdPerMillion}
+                    />
                 </div>
 
                 <section aria-label="Network fee comparison" className="opex-summary">
@@ -1884,12 +1913,56 @@ export function App() {
                             </article>
                         </div>
                     </section>
+
+                    {isChannel && (
+                        <section aria-label="Off-chain verify fleet" className="opex-group">
+                            <div className="opex-group-heading">
+                                <div>
+                                    <span>Off-chain compute — a burn (placeholder)</span>
+                                    <h3>Voucher verify fleet</h3>
+                                </div>
+                                <p>
+                                    {perPaymentVerify
+                                        ? 'Client-signed: the operator verifies one Ed25519 voucher per accepted payment off-chain. No benchmark yet — dial the penalty in section 04.'
+                                        : 'Operator-signed (MPP): no per-payment client signature to verify, so this plane is eliminated. Vanilla carries no vouchers either.'}
+                                </p>
+                            </div>
+                            <div className="opex-metrics-grid">
+                                <article className="metric-card">
+                                    <span>Verify fleet cost</span>
+                                    <strong>{formatUsd(verifyComputeUsdPerYear)}</strong>
+                                    <small>per year · {formatUsd(verifyComputeUsdPerSecond * SECONDS_PER_DAY)} / day</small>
+                                </article>
+                                <article className="metric-card">
+                                    <span>Verifies / second</span>
+                                    <strong>{formatCompact(voucherVerifiesPerSecond, 2)}</strong>
+                                    <small>{perPaymentVerify ? 'one per accepted payment' : 'none — no per-payment verify'}</small>
+                                </article>
+                                <article className="metric-card">
+                                    <span>Verify take-rate</span>
+                                    <strong>
+                                        {formatTakeRate(
+                                            grossValuePerSecondUsd > 0
+                                                ? (verifyComputeUsdPerYear / (grossValuePerSecondUsd * SECONDS_PER_YEAR)) *
+                                                      10_000
+                                                : 0,
+                                        )}
+                                    </strong>
+                                    <small>{perPaymentVerify ? 'MPP drops this to $0' : 'eliminated by operator-signing'}</small>
+                                </article>
+                            </div>
+                        </section>
+                    )}
                 </div>
 
                 <section aria-label="All-in annual operating cost" className="opex-total">
                     <div>
                         <span>All-in annual operating cost</span>
-                        <small>Annual network spend plus the carrying cost of refundable capital.</small>
+                        <small>
+                            Annual network spend
+                            {perPaymentVerify ? ' + off-chain verify fleet' : ''} plus the carrying cost of refundable
+                            capital.
+                        </small>
                     </div>
                     <strong>{formatUsd(totalOpexUsdPerYear)}</strong>
                     <span>{formatTakeRate(allInTakeRateBps)} of annual gross value</span>
