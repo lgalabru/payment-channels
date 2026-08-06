@@ -160,7 +160,7 @@ const DEFAULT_DEMAND: DemandInputs = {
     channelLifetimeSeconds: 86_400,
     priorityFeeLamportsPerTx: 0,
     settlementClockSeconds: 60,
-    solPriceUsd: 150,
+    solPriceUsd: 80,
     users: 10_000_000,
 };
 
