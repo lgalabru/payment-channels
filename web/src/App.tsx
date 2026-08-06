@@ -260,8 +260,8 @@ type BaseMethod = 'vanilla' | 'v1' | 'v2';
 type SettlementScheme = 'none' | 'x402' | 'mpp';
 const BASE_METHODS: readonly { id: BaseMethod; label: string; sub: string }[] = [
     { id: 'vanilla', label: 'Vanilla transfer', sub: 'one on-chain tx / payment' },
-    { id: 'v1', label: 'Payment channel v1', sub: 'open + close every session' },
-    { id: 'v2', label: 'Payment channel v2', sub: 'persistent channel, re-arm per session' },
+    { id: 'v1', label: 'Payment channel v1', sub: 'Ephemeral channels' },
+    { id: 'v2', label: 'Payment channel v2', sub: '• Recyclable channels\n• Operated voucher compaction' },
 ];
 function baseMethodOf(mode: ModelMode): BaseMethod {
     if (mode === 'vanilla') return 'vanilla';
@@ -570,7 +570,6 @@ export function App() {
     });
     const [demand, setDemand] = useState<DemandInputs>(() => ({ ...DEFAULT_DEMAND, ...readSharedParams().demand }));
     const [activeSimds, setActiveSimds] = useState<readonly string[]>([]);
-    const [isCustomized, setIsCustomized] = useState(false);
 
     // Mirror the four shareable knobs into the URL query so any configuration is linkable.
     // Debounced + guarded: dragging a range slider fires an `input` event per pixel, so a single
@@ -763,7 +762,6 @@ export function App() {
 
     const updateInput = <Key extends keyof ModelInputs>(key: Key, value: ModelInputs[Key]) => {
         setInputs(previous => ({ ...previous, [key]: value }));
-        setIsCustomized(true);
     };
 
     const updateDemand = <Key extends keyof DemandInputs>(key: Key, value: DemandInputs[Key]) => {
@@ -806,7 +804,6 @@ export function App() {
                 checkpointBatchSize: Math.min(merged.checkpointBatchSize, checkpointMaxBatch(merged.mode, merged.largeTx)),
             };
         });
-        setIsCustomized(false);
     };
 
     const selectMode = (mode: ModelMode) => {
@@ -823,7 +820,6 @@ export function App() {
                 : X402_CHECKPOINT_DEFAULT_BATCH
             : inputs.checkpointBatchSize;
         setInputs(previous => ({ ...previous, checkpointBatchSize, mode, transferCostUnits }));
-        setIsCustomized(true);
     };
 
     const activeBaseMethod = baseMethodOf(inputs.mode);
@@ -844,7 +840,6 @@ export function App() {
         const transferCostUnits =
             transferKind === 'spl-token' ? SPL_TOKEN_TRANSFER_COST_UNITS : TOKEN_2022_TRANSFER_COST_UNITS;
         setInputs(previous => ({ ...previous, transferCostUnits, transferKind }));
-        setIsCustomized(true);
     };
 
     return (
@@ -878,7 +873,6 @@ export function App() {
                         <p className="section-index">01</p>
                         <h2 id="timeline-title">Relevant Upgrade timeline</h2>
                     </div>
-                    <p>Shipped precedent + SIMDs in review. Toggle the modeled deltas.</p>
                 </div>
                 <div className="simd-grid">
                     {SIMDS.map(simd => {
@@ -912,30 +906,6 @@ export function App() {
                             </div>
                         );
                     })}
-                </div>
-                <div className="phase-summary" aria-live="polite">
-                    <div>
-                        <span>
-                            {isCustomized
-                                ? 'Custom scenario'
-                                : activeSimds.length
-                                  ? `${activeSimds.length} SIMD${activeSimds.length === 1 ? '' : 's'} stacked`
-                                  : 'Today — mainnet baseline'}
-                        </span>
-                        <strong>
-                            {activeSimds.length
-                                ? SIMDS.filter(simd => activeSimds.includes(simd.id))
-                                      .map(simd => simd.label)
-                                      .join(' + ')
-                                : 'No upgrades applied'}
-                        </strong>
-                    </div>
-                    <p>
-                        No reviewed proposal raises CU/s past ~250M — every gain here cuts per-operation cost, not the block
-                        ceiling. If a 150M/200M-block proposal appears it multiplies every ceiling on this page
-                        linearly; that is the number to watch the SIMD repo for.
-                    </p>
-                    {isCustomized && <span className="custom-badge">Modified</span>}
                 </div>
             </section>
 

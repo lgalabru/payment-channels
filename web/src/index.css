@@ -163,7 +163,6 @@ h1 {
 }
 
 .timeline-panel .section-heading,
-.timeline-panel .phase-summary,
 .timeline-panel .timeline,
 .timeline-panel .simd-grid {
     position: relative;
@@ -379,45 +378,6 @@ h1 {
 .phase-selected strong,
 .phase-selected small {
     color: var(--accent);
-}
-
-.phase-summary {
-    align-items: center;
-    background: #1b1b1b;
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    display: grid;
-    gap: 18px;
-    grid-template-columns: 160px minmax(0, 1fr) auto;
-    padding: 11px 14px;
-}
-
-.phase-summary > div {
-    display: flex;
-    flex-direction: column;
-}
-
-.phase-summary span,
-.phase-summary p {
-    color: var(--muted);
-    font-size: 0.8rem;
-}
-
-.phase-summary p {
-    line-height: 1.45;
-    margin: 0;
-}
-
-.phase-summary strong {
-    font-size: 0.95rem;
-}
-
-.custom-badge {
-    border: 1px solid var(--accent);
-    border-radius: 999px;
-    color: var(--accent) !important;
-    padding: 4px 9px;
-    text-transform: uppercase;
 }
 
 .mode-switch {
@@ -796,6 +756,7 @@ input[type='range'] {
 
 .progress-mode-switch small {
     color: var(--muted);
+    white-space: pre-line;
 }
 
 /* Two-tier settlement stack: base rail + optional settlement scheme, side by side with a horizontal gap. */
@@ -1368,16 +1329,6 @@ footer p {
 
     .timeline {
         margin-right: -16px;
-    }
-
-    .phase-summary {
-        gap: 10px;
-        grid-template-columns: 1fr auto;
-    }
-
-    .phase-summary p {
-        grid-column: 1 / -1;
-        grid-row: 2;
     }
 
     .mode-switch,
