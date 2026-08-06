@@ -1517,8 +1517,12 @@ export function App() {
                 data-horizon={pinnedHorizon}
                 key={pinnedScenarioKey}
             >
-                <div className="opex-sticky-core">
-                    <span className="opex-sticky-eyebrow">{settlementLabel(inputs.mode, inputs.scheme)}</span>
+                <div className="opex-sticky-rail">
+                    <span className="opex-sticky-label">Settlement stack</span>
+                    <strong className="opex-sticky-stack">{settlementLabel(inputs.mode, inputs.scheme)}</strong>
+                </div>
+                <div className="opex-sticky-metric">
+                    <span className="opex-sticky-label">All-in operating cost</span>
                     <strong className="opex-sticky-cost">
                         {formatUsd(totalOpexUsdPerDay)} <small>/ day</small>
                     </strong>

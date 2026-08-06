@@ -1445,7 +1445,7 @@ footer p {
     bottom: max(14px, env(safe-area-inset-bottom));
     box-shadow: 0 16px 48px rgba(0, 0, 0, 0.72);
     display: flex;
-    justify-content: center;
+    justify-content: space-between;
     inset-inline: max(16px, calc((100vw - 1360px) / 2));
     isolation: isolate;
     min-height: 72px;
@@ -1454,19 +1454,35 @@ footer p {
     z-index: 20;
 }
 
-.opex-sticky-core {
-    align-items: center;
-    display: flex;
-    gap: 14px;
-    justify-content: center;
+.opex-sticky-rail,
+.opex-sticky-metric {
+    display: grid;
+    gap: 4px;
     min-width: 0;
 }
 
-.opex-sticky-eyebrow {
+.opex-sticky-label {
     color: var(--accent);
     font-size: 0.64rem;
     font-weight: 700;
     text-transform: uppercase;
+}
+
+.opex-sticky-stack {
+    font-size: 0.95rem;
+    font-weight: 600;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.opex-sticky-metric {
+    justify-items: end;
+    text-align: right;
+}
+
+.opex-sticky-metric > .opex-sticky-label {
+    color: var(--muted);
 }
 
 .opex-sticky-cost {
@@ -1492,13 +1508,12 @@ footer p {
         padding: 12px 16px max(12px, env(safe-area-inset-bottom));
     }
 
-    .opex-sticky-core {
-        align-items: baseline;
-        gap: 10px;
+    .opex-sticky-label {
+        font-size: 0.58rem;
     }
 
-    .opex-sticky-eyebrow {
-        font-size: 0.58rem;
+    .opex-sticky-stack {
+        font-size: 0.82rem;
     }
 }
 
@@ -1615,7 +1630,7 @@ body {
 
 .eyebrow,
 .section-index,
-.opex-sticky-eyebrow {
+.opex-sticky-label {
     color: var(--accent);
     font-family: 'ABC Schengen A Trial', 'SF Mono', 'SFMono-Regular', Consolas, monospace;
     font-weight: 450;
