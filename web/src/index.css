@@ -1546,6 +1546,13 @@ footer p {
     white-space: nowrap;
 }
 
+.opex-sticky-metrics small {
+    color: var(--muted);
+    font-size: 0.58rem;
+    line-height: 1.2;
+    white-space: nowrap;
+}
+
 .opex-sticky-primary strong {
     color: var(--accent);
     font-size: 1.18rem;

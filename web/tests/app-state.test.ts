@@ -105,6 +105,48 @@ test('horizon switches change and restore the pinned economics summary', () => {
     assert.deepEqual(summary(restored), todaySummary);
 });
 
+test('10M MPP cash cost curve separates fees from capital carry', () => {
+    const base = appReducer(createInitialState(), {
+        patch: { horizon: 'today', scale: '10M' },
+        type: 'select-preset',
+    });
+    const atCashInterval = (seconds: number) => {
+        let state = appReducer(base, { type: 'update-settlement-clock', value: seconds });
+        state = appReducer(state, { key: 'checkpointClockSeconds', type: 'update-input', value: 0 });
+        return evaluateModel(state.inputs, state.demand);
+    };
+    const fiveMinutes = atCashInterval(300);
+    const oneHour = atCashInterval(3_600);
+    const twoHours = atCashInterval(7_200);
+
+    assert.ok(oneHour.feeUsdPerYear < fiveMinutes.feeUsdPerYear);
+    assert.ok(oneHour.capitalCarryingCostUsdPerYear > fiveMinutes.capitalCarryingCostUsdPerYear);
+    assert.ok(oneHour.totalOpexUsdPerYear < fiveMinutes.totalOpexUsdPerYear);
+    assert.ok(twoHours.feeUsdPerYear < oneHour.feeUsdPerYear);
+    assert.ok(twoHours.capitalCarryingCostUsdPerYear > oneHour.capitalCarryingCostUsdPerYear);
+    assert.ok(twoHours.totalOpexUsdPerYear > oneHour.totalOpexUsdPerYear);
+});
+
+test('10M MPP checkpoints add fees without changing cash float', () => {
+    let base = appReducer(createInitialState(), {
+        patch: { horizon: 'today', scale: '10M' },
+        type: 'select-preset',
+    });
+    base = appReducer(base, { type: 'update-settlement-clock', value: 3_600 });
+    const atCheckpointInterval = (seconds: number) => {
+        const state = appReducer(base, { key: 'checkpointClockSeconds', type: 'update-input', value: seconds });
+        return evaluateModel(state.inputs, state.demand);
+    };
+    const disabled = atCheckpointInterval(0);
+    const twoMinutes = atCheckpointInterval(120);
+    const tenMinutes = atCheckpointInterval(600);
+
+    assert.ok(twoMinutes.feeUsdPerYear > disabled.feeUsdPerYear);
+    assert.ok(tenMinutes.feeUsdPerYear < twoMinutes.feeUsdPerYear);
+    assert.equal(twoMinutes.escrowFloatUsd, disabled.escrowFloatUsd);
+    assert.equal(tenMinutes.capitalCarryingCostUsdPerYear, disabled.capitalCarryingCostUsdPerYear);
+});
+
 test('manual edits clear the preset in the same transition', () => {
     const state = appReducer(createInitialState(), {
         key: 'averageTransactionValueUsd',

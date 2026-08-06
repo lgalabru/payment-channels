@@ -84,6 +84,10 @@ function settlementLabel(mode: ModelMode, scheme: SettlementScheme): string {
     return scheme === 'none' ? base : `${base} · ${SCHEME_LABELS[scheme]}`;
 }
 
+function formatClock(seconds: number): string {
+    return SETTLEMENT_CLOCK_OPTIONS.find(option => option.value === seconds)?.label ?? `${formatCompact(seconds, 2)}s`;
+}
+
 const BASE_METHODS: readonly { id: BaseMethod; label: string; sub: string }[] = [
     { id: 'vanilla', label: 'Vanilla transfer', sub: 'one on-chain tx / payment' },
     { id: 'v1', label: 'Payment channel v1', sub: 'Deployed · persistent OPEN channels' },
@@ -567,8 +571,8 @@ export function App() {
                     />
                     <SelectKnob
                         disabled={inputs.mode === 'vanilla'}
-                        help="Cash delivery/refill cadence. The channel stays OPEN; optional checkpoints control faster enforceability. Disabled uses only terminal close."
-                        label="Cash sweep clock"
+                        help="Longer intervals reduce on-chain sweep fees, but tie up more refundable escrow and increase its carrying cost. Disabled waits for terminal close."
+                        label="Cash settlement interval"
                         onChange={value => dispatch({ type: 'update-settlement-clock', value })}
                         options={SETTLEMENT_CLOCK_OPTIONS}
                         value={demand.settlementClockSeconds}
@@ -939,8 +943,8 @@ export function App() {
                                 {checkpointingAvailable && (
                                     <>
                                         <SelectKnob
-                                            help="Cadence of interim enforceability settles between cash sweeps. Disabled = no extra checkpoints."
-                                            label="Checkpoint cadence"
+                                            help="Extra on-chain writes for faster enforceability. Enabling adds fees; a longer interval means fewer checkpoint fees and does not change cash float."
+                                            label="Enforceability checkpoint"
                                             onChange={value =>
                                                 dispatch({ key: 'checkpointClockSeconds', type: 'update-input', value })
                                             }
@@ -1518,8 +1522,13 @@ export function App() {
             >
                 <div className="opex-sticky-rail">
                     <div className="opex-sticky-identity">
-                        <span className="opex-sticky-eyebrow">{pinnedHorizon} scenario</span>
-                        <strong className="opex-sticky-label">{settlementLabel(inputs.mode, inputs.scheme)}</strong>
+                        <span className="opex-sticky-eyebrow">
+                            {pinnedHorizon} · {settlementLabel(inputs.mode, inputs.scheme)}
+                        </span>
+                        <strong className="opex-sticky-label">
+                            Cash {formatClock(demand.settlementClockSeconds)} · Checkpoint{' '}
+                            {formatClock(inputs.checkpointClockSeconds)}
+                        </strong>
                     </div>
                     <span className={`opex-sticky-verdict ${canHandleDemand ? 'pass' : 'over'}`}>
                         {canHandleDemand
@@ -1529,16 +1538,18 @@ export function App() {
                 </div>
                 <div className="opex-sticky-metrics">
                     <div className="opex-sticky-primary">
-                        <span>All-in opex</span>
+                        <span>All-in annual cost</span>
                         <strong>{formatUsd(totalOpexUsdPerYear)}/yr</strong>
                     </div>
                     <div>
-                        <span>Network fees</span>
-                        <strong>{formatUsd(networkFeeUsdPerSecond * SECONDS_PER_DAY)}/day</strong>
+                        <span>Network fees / year</span>
+                        <strong>{formatUsd(feeUsdPerYear)}</strong>
+                        <small>↓ as cash interval grows</small>
                     </div>
                     <div>
-                        <span>Take-rate</span>
-                        <strong>{formatTakeRate(allInTakeRateBps)}</strong>
+                        <span>Capital carry / year</span>
+                        <strong>{formatUsd(capitalCarryingCostUsdPerYear)}</strong>
+                        <small>↑ as cash interval grows</small>
                     </div>
                     <div>
                         <span>On-chain budget</span>
