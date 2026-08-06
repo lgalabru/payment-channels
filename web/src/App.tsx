@@ -134,7 +134,7 @@ const DEFAULT_DEMAND: DemandInputs = {
     priorityFeeLamportsPerTx: 0,
     settlementClockSeconds: 60,
     solPriceUsd: 150,
-    users: 1_000_000,
+    users: 10_000_000,
 };
 
 const TODAY: ModelInputs = {
@@ -768,16 +768,16 @@ export function App() {
                 <div className="demand-controls">
                     <DiscreteRangeKnob
                         format={formatCompact}
-                        help="Concurrent users generating requests"
-                        label="Users"
+                        help="Concurrent users or agents making paid requests"
+                        label="Payers (users / agents)"
                         onChange={value => updateArrivingDemand('users', value)}
                         options={USER_STEPS}
                         value={demand.users}
                     />
                     <RangeKnob
                         format={value => `${formatInteger(value)} RPM`}
-                        help="Average requests per minute per user"
-                        label="Avg RPM/user"
+                        help="Average paid requests per minute per payer"
+                        label="Avg RPM/payer"
                         max={500}
                         min={0}
                         onChange={value => updateArrivingDemand('averageRequestsPerMinutePerUser', value)}
@@ -842,8 +842,8 @@ export function App() {
                 <div className="capacity-equation">
                     <span>Logical demand</span>
                     <strong>
-                        {formatCompact(demand.users, 2)} users × {formatInteger(demand.averageRequestsPerMinutePerUser)}{' '}
-                        RPM ÷ 60 = {formatCompact(logicalRequestsPerSecond, 2)} req/s
+                        {formatCompact(demand.users, 2)} payers × {formatInteger(demand.averageRequestsPerMinutePerUser)}{' '}
+                        paid req/payer/min ÷ 60 = {formatCompact(logicalRequestsPerSecond, 2)} req/s
                     </strong>
                     <small>
                         {isChannel
@@ -1206,7 +1206,7 @@ export function App() {
                     <strong>
                         {isChannel ? formatCompact(liveChannels, 2) : formatCompact(requiredBudgetPerSecond, 2)}
                     </strong>
-                    <small>{isChannel ? 'one active channel per user' : 'cost units / second'}</small>
+                    <small>{isChannel ? 'one active channel per payer' : 'cost units / second'}</small>
                 </article>
                 <article className="metric-card">
                     <span>{isChannel ? 'Refundable rent capital' : 'Nominal capacity gap (100% budget)'}</span>
@@ -1216,7 +1216,7 @@ export function App() {
                             : `${(requiredBudgetPerSecond / nominalBudgetPerSecond).toFixed(2)}×`}
                     </strong>
                     <small>
-                        {isChannel ? 'to keep user channels live' : 'verdict uses the configured available percentage'}
+                        {isChannel ? 'to keep payer channels live' : 'verdict uses the configured available percentage'}
                     </small>
                 </article>
             </section>
