@@ -1,20 +1,29 @@
 import { useEffect, useId, useState } from 'react';
 
-type ModelMode = 'vanilla' | 'channel-v1' | 'channel-v2' | 'x402-batch' | 'mpp-operator';
+// The settlement selector is a two-tier "stack": a base rail (vanilla / channel v1 / channel v2) and,
+// for channels, an independent settlement scheme (x402 client-signed, or MPP operator-signed). The two are
+// ORTHOGONAL — a scheme rides whichever base is selected (v1 or v2), it does not change the base. `mode`
+// carries the base only; `scheme` carries the voucher plane.
+type ModelMode = 'vanilla' | 'channel-v1' | 'channel-v2';
+type BaseMethod = 'vanilla' | 'v1' | 'v2';
+type SettlementScheme = 'none' | 'x402' | 'mpp';
 type TransferKind = 'spl-token' | 'token-2022';
 
 interface ModelInputs {
     availableCapacityPercent: number;
     blockCostUnits: number;
-    // Cadence of interim enforceability checkpoints, in seconds; 0 disables them (mode reduces to v2).
-    // Only read for x402-batch / mpp-operator.
+    // Cadence of interim enforceability checkpoints, in seconds; 0 disables them (scheme reduces to a plain
+    // channel). Only meaningful when a scheme (x402 / mpp) is active.
     checkpointClockSeconds: number;
-    // Channel-settles packed into one checkpoint tx (n in the per-mode fit). Only read for checkpoint modes.
+    // Channel-settles packed into one checkpoint tx (n in the per-scheme fit). Only read when a scheme is on.
     checkpointBatchSize: number;
     // Cost of the `open` instruction in CU. SIMD-0567 (p-ATA) cuts this from 36,086 to ~17,300; feeds the
     // v1 lifecycle and the v2 amortized open. Extracted as an input so timeline SIMDs can move it.
     openCostUnits: number;
     mode: ModelMode;
+    // Off-chain settlement scheme layered on the channel base: 'none' (plain v1/v2), 'x402' (client-signed
+    // vouchers), or 'mpp' (operator-signed — no per-payment verify). Orthogonal to `mode`.
+    scheme: SettlementScheme;
     reclaimBatchSize: number;
     rentPerChannelSol: number;
     slotMs: number;
@@ -95,12 +104,12 @@ const V2_OPEN_COST_UNITS = 36_086; // baseline `open` cost (default ModelInputs.
 // v1 lifecycle with the `open` instruction factored out, so timeline SIMDs can move open independently.
 const V1_LIFECYCLE_EX_OPEN_COST_UNITS = V1_LIFECYCLE_COST_UNITS - V2_OPEN_COST_UNITS; // 25,536
 const V2_TERMINAL_CLOSE_COST_UNITS = 23_875; // final settle_and_seal + distribute, carries the last voucher
-// Enforceability checkpoints (x402-batch / mpp-operator only). An interim settle that advances the
+// Enforceability checkpoints (x402 / mpp schemes only). An interim settle that advances the
 // on-chain watermark so accumulated voucher value becomes claimable BETWEEN cash-sweep boundaries —
 // the "cheap + frequent" plane of the decoupled-cadence design (see ONE_MINUTE_SETTLEMENT.md). Additive
-// on top of the v2 lifecycle: with the checkpoint cadence disabled, these modes reduce to plain v2.
-// x402: distinct client signer per customer, so each checkpoint packs [Ed25519, settle] pairs, size-bound
-// at n ≤ 5 in a 1,232-byte tx (~16 under a 4kB tx). mpp-operator: one operator holds authorizedSigner
+// on top of the base lifecycle: with the checkpoint cadence disabled (the default), the scheme is a plain
+// channel. x402: distinct client signer per customer, so each checkpoint packs [Ed25519, settle] pairs,
+// size-bound at n ≤ 5 in a 1,232-byte tx (~16 under a 4kB tx). mpp: one operator holds authorizedSigner
 // across the fleet, so ADR-004 batches DISTINCT customers into one signed commitment, account-bound at
 // n ≤ 59. Per-channel fits from MODES_MPP_X402.md (toly, 2026-08-06).
 const X402_CHECKPOINT_TODAY_MAX_BATCH = 5; // 1,232-byte tx limit today
@@ -159,12 +168,15 @@ const TODAY: ModelInputs = {
     availableCapacityPercent: 50,
     blockCostUnits: 100_000_000,
     checkpointBatchSize: X402_CHECKPOINT_DEFAULT_BATCH,
-    checkpointClockSeconds: 60,
+    // Checkpoints default OFF: selecting a scheme should not silently spend the whole CU budget on interim
+    // enforceability settles (at 10M channels/60s that alone exceeds the block budget). Opt in via the knob.
+    checkpointClockSeconds: 0,
     largeTx: false,
     mode: 'channel-v1',
     openCostUnits: V2_OPEN_COST_UNITS,
     reclaimBatchSize: 8,
     rentPerChannelSol: 0.00471192,
+    scheme: 'none',
     slotMs: 400,
     transferCostUnits: SPL_TOKEN_TRANSFER_COST_UNITS,
     transferKind: 'spl-token',
@@ -247,17 +259,19 @@ const SIMDS: readonly Simd[] = [
 const MODE_LABELS: Readonly<Record<ModelMode, string>> = {
     'channel-v1': 'Payment channel v1',
     'channel-v2': 'Payment channel v2',
-    'mpp-operator': 'MPP voucher (operator-signed)',
     vanilla: 'Vanilla transfer',
-    'x402-batch': 'x402 batch settlement',
 };
+const SCHEME_LABELS: Readonly<Record<SettlementScheme, string>> = {
+    mpp: 'MPP',
+    none: '',
+    x402: 'x402',
+};
+/** Composed label for the selected stack, e.g. "Payment channel v2 · MPP". */
+function settlementLabel(mode: ModelMode, scheme: SettlementScheme): string {
+    const base = MODE_LABELS[mode];
+    return scheme === 'none' ? base : `${base} · ${SCHEME_LABELS[scheme]}`;
+}
 
-// The settlement selector is a two-tier "stack": a base rail (vanilla / channel v1 / channel v2) and,
-// for channels, an optional settlement scheme (x402 client-signed batch, or MPP operator-signed sessions).
-// The scheme is the OFF-CHAIN voucher plane; x402-batch and mpp-operator are both modeled on the persistent
-// (v2) channel, so choosing a scheme resolves the effective mode onto the v2 base.
-type BaseMethod = 'vanilla' | 'v1' | 'v2';
-type SettlementScheme = 'none' | 'x402' | 'mpp';
 const BASE_METHODS: readonly { id: BaseMethod; label: string; sub: string }[] = [
     { id: 'vanilla', label: 'Vanilla transfer', sub: 'one on-chain tx / payment' },
     { id: 'v1', label: 'Payment channel v1', sub: 'Ephemeral channels' },
@@ -266,26 +280,20 @@ const BASE_METHODS: readonly { id: BaseMethod; label: string; sub: string }[] = 
 function baseMethodOf(mode: ModelMode): BaseMethod {
     if (mode === 'vanilla') return 'vanilla';
     if (mode === 'channel-v1') return 'v1';
-    return 'v2'; // channel-v2, x402-batch, mpp-operator all settle on the persistent v2 channel
-}
-function schemeOf(mode: ModelMode): SettlementScheme {
-    if (mode === 'x402-batch') return 'x402';
-    if (mode === 'mpp-operator') return 'mpp';
-    return 'none';
+    return 'v2';
 }
 
-// x402 batch and MPP operator-signed both settle on-chain like v2 (persistent channel, ADR-005 re-arm);
-// they differ only in the OFF-CHAIN voucher plane, below.
-const PERSISTENT_CHANNEL_MODES: readonly ModelMode[] = ['channel-v2', 'x402-batch', 'mpp-operator'];
+// Channel persistence is a property of the BASE: v2 keeps the channel open across sessions (ADR-005 re-arm),
+// v1 tears down and rebuilds each session. A settlement scheme (x402/mpp) does not change this.
 function isPersistentChannel(mode: ModelMode): boolean {
-    return PERSISTENT_CHANNEL_MODES.includes(mode);
+    return mode === 'channel-v2';
 }
-// Client-signed modes need one Ed25519 voucher verified per payment (the off-chain fleet). MPP
-// operator-signed mode (mpp-specs #309) inverts this: the operator holds authorizedSigner and signs the
-// cumulative vouchers itself, while the client authenticates each request with a reusable bearer proof —
-// so there is no per-payment client signature to verify. Vanilla carries no vouchers at all.
-function requiresPerPaymentVerify(mode: ModelMode): boolean {
-    return mode === 'channel-v1' || mode === 'channel-v2' || mode === 'x402-batch';
+// Per-payment Ed25519 voucher verification (the off-chain fleet) is needed for a plain channel or the
+// client-signed x402 scheme. MPP operator-signed (mpp-specs #309) inverts it: the operator holds
+// authorizedSigner and signs cumulative vouchers itself while the client uses a reusable bearer proof, so
+// there is no per-payment client signature to verify. Vanilla carries no vouchers at all.
+function requiresPerPaymentVerify(mode: ModelMode, scheme: SettlementScheme): boolean {
+    return mode !== 'vanilla' && scheme !== 'mpp';
 }
 
 function formatCompact(value: number, decimals = 1): string {
@@ -432,29 +440,30 @@ function reclaimCostPerChannel(batchSize: number): number {
     return 617 + 1_044 / batchSize;
 }
 
-function isCheckpointMode(mode: ModelMode): boolean {
-    return mode === 'x402-batch' || mode === 'mpp-operator';
+/** A settlement scheme (x402 / mpp) supports enforceability checkpoints; a plain channel does not. */
+function schemeHasCheckpoints(scheme: SettlementScheme): boolean {
+    return scheme !== 'none';
 }
 
 /**
- * Largest number of channel-settles that pack into one checkpoint tx for the given mode. x402 is size-bound
- * (5 today, 16 under 4kB txs); mpp-operator is account-bound via ADR-004 (59, 60 under 4kB). `largeTx`
+ * Largest number of channel-settles that pack into one checkpoint tx for the given scheme. x402 is
+ * size-bound (5 today, 16 under 4kB txs); mpp is account-bound via ADR-004 (59, 60 under 4kB). `largeTx`
  * reflects SIMD-0296 / 0385 being active on the timeline.
  */
-function checkpointMaxBatch(mode: ModelMode, largeTx: boolean): number {
-    if (mode === 'mpp-operator') return largeTx ? MPP_CHECKPOINT_LARGETX_MAX_BATCH : MPP_CHECKPOINT_MAX_BATCH;
+function checkpointMaxBatch(scheme: SettlementScheme, largeTx: boolean): number {
+    if (scheme === 'mpp') return largeTx ? MPP_CHECKPOINT_LARGETX_MAX_BATCH : MPP_CHECKPOINT_MAX_BATCH;
     return largeTx ? X402_CHECKPOINT_MAX_BATCH : X402_CHECKPOINT_TODAY_MAX_BATCH;
 }
 
 /**
  * Scheduler cost of one enforceability checkpoint, per channel, at batch size `n`.
- * x402-batch packs [Ed25519, settle] pairs (client signer per customer); mpp-operator batches distinct
- * customers under one operator signer via ADR-004. Fits from MODES_MPP_X402.md. Non-checkpoint modes: 0.
+ * x402 packs [Ed25519, settle] pairs (client signer per customer); mpp batches distinct customers under one
+ * operator signer via ADR-004. Fits from MODES_MPP_X402.md. No scheme (plain channel): 0.
  */
-function checkpointCostPerChannel(mode: ModelMode, batchSize: number): number {
+function checkpointCostPerChannel(scheme: SettlementScheme, batchSize: number): number {
     const n = Math.max(1, batchSize);
-    if (mode === 'x402-batch') return 3_166 + 1_043 / n;
-    if (mode === 'mpp-operator') return 890 + 3_420 / n;
+    if (scheme === 'x402') return 3_166 + 1_043 / n;
+    if (scheme === 'mpp') return 890 + 3_420 / n;
     return 0;
 }
 
@@ -514,19 +523,16 @@ function clampArrivingDemand(previous: DemandInputs, key: ArrivingDemandKey, pro
 
 /** Interactive capacity model backed by the report's measured scheduler costs. */
 const QUERY_TO_MODE: Readonly<Record<string, ModelMode>> = {
-    mpp: 'mpp-operator',
     v1: 'channel-v1',
     v2: 'channel-v2',
     vanilla: 'vanilla',
-    x402: 'x402-batch',
 };
 const MODE_TO_QUERY: Readonly<Record<ModelMode, string>> = {
     'channel-v1': 'v1',
     'channel-v2': 'v2',
-    'mpp-operator': 'mpp',
     vanilla: 'vanilla',
-    'x402-batch': 'x402',
 };
+const QUERY_TO_SCHEME: Readonly<Record<string, SettlementScheme>> = { mpp: 'mpp', x402: 'x402' };
 
 /** Snap an arbitrary user count to the nearest discrete slider step. */
 function nearestUserStep(value: number): number {
@@ -536,8 +542,8 @@ function nearestUserStep(value: number): number {
     );
 }
 
-/** Seed demand + settlement method from the shareable `?users&rpm&clock&method` query. */
-function readSharedParams(): { demand: Partial<DemandInputs>; mode?: ModelMode } {
+/** Seed demand + settlement method from the shareable `?users&rpm&clock&method&scheme` query. */
+function readSharedParams(): { demand: Partial<DemandInputs>; mode?: ModelMode; scheme?: SettlementScheme } {
     const demand: Partial<DemandInputs> = {};
     if (typeof window === 'undefined') return { demand };
     const params = new URLSearchParams(window.location.search);
@@ -555,18 +561,18 @@ function readSharedParams(): { demand: Partial<DemandInputs>; mode?: ModelMode }
         demand.settlementClockSeconds = clock;
     }
 
-    return { demand, mode: QUERY_TO_MODE[params.get('method') ?? ''] };
-}
-
-/** Apply a settlement method to model inputs. */
-function inputsForMode(base: ModelInputs, mode: ModelMode): ModelInputs {
-    return { ...base, mode };
+    return { demand, mode: QUERY_TO_MODE[params.get('method') ?? ''], scheme: QUERY_TO_SCHEME[params.get('scheme') ?? ''] };
 }
 
 export function App() {
     const [inputs, setInputs] = useState<ModelInputs>(() => {
-        const { mode } = readSharedParams();
-        return mode ? inputsForMode(TODAY, mode) : TODAY;
+        const { mode, scheme } = readSharedParams();
+        return {
+            ...TODAY,
+            ...(mode ? { mode } : {}),
+            // A scheme only applies to a channel base; ignore it under vanilla.
+            ...(scheme && (mode ?? TODAY.mode) !== 'vanilla' ? { scheme } : {}),
+        };
     });
     const [demand, setDemand] = useState<DemandInputs>(() => ({ ...DEFAULT_DEMAND, ...readSharedParams().demand }));
     const [activeSimds, setActiveSimds] = useState<readonly string[]>([]);
@@ -586,6 +592,7 @@ export function App() {
             params.set('rpm', String(demand.averageRequestsPerMinutePerUser));
             params.set('clock', String(demand.settlementClockSeconds));
             params.set('method', MODE_TO_QUERY[inputs.mode]);
+            if (inputs.scheme !== 'none') params.set('scheme', inputs.scheme);
             try {
                 window.history.replaceState(
                     null,
@@ -598,7 +605,7 @@ export function App() {
             }
         }, 200);
         return () => window.clearTimeout(handle);
-    }, [demand, inputs.mode]);
+    }, [demand, inputs.mode, inputs.scheme]);
 
     const blocksPerSecond = 1_000 / inputs.slotMs;
     const nominalBudgetPerSecond = inputs.blockCostUnits * blocksPerSecond;
@@ -634,16 +641,17 @@ export function App() {
         ? Math.max(1, demand.channelLifetimeSeconds / demand.settlementClockSeconds)
         : 1;
 
-    // Enforceability checkpoints (x402-batch / mpp-operator only). A separate, typically FASTER cadence than
-    // the cash-sweep clock above: each live channel posts one interim settle per checkpoint window to make
-    // its accumulated voucher value claimable early. This is additive on-chain cost on top of the v2
-    // lifecycle; with the cadence disabled it contributes nothing and the mode is exactly v2. mpp-operator
+    // Enforceability checkpoints (x402 / mpp schemes only). A separate, typically FASTER cadence than the
+    // cash-sweep clock above: each live channel posts one interim settle per checkpoint window to make its
+    // accumulated voucher value claimable early. Additive on-chain cost on top of the base lifecycle; with
+    // the cadence disabled (the default) it contributes nothing and the scheme is a plain channel. mpp
     // batches distinct customers under one operator signer (ADR-004, ~948 CU/ch); x402 packs per-customer
     // [Ed25519, settle] pairs (~3,375 CU/ch at n=5) — so mpp is strictly cheaper here at equal demand.
-    const checkpointsEnabled = isCheckpointMode(inputs.mode) && inputs.checkpointClockSeconds > 0;
+    const hasCheckpointScheme = isChannel && schemeHasCheckpoints(inputs.scheme);
+    const checkpointsEnabled = hasCheckpointScheme && inputs.checkpointClockSeconds > 0;
     const checkpointChannels = isChannel ? demand.users : 0;
     const checkpointCostPerChannelUnits = checkpointsEnabled
-        ? checkpointCostPerChannel(inputs.mode, inputs.checkpointBatchSize)
+        ? checkpointCostPerChannel(inputs.scheme, inputs.checkpointBatchSize)
         : 0;
     const checkpointsPerSecond = checkpointsEnabled ? checkpointChannels / inputs.checkpointClockSeconds : 0;
     const checkpointCostUnitsPerSecond = checkpointsPerSecond * checkpointCostPerChannelUnits;
@@ -662,7 +670,7 @@ export function App() {
     const maximumPaymentsPerSecond = costPerLogicalPayment > 0 ? budgetForPaymentsPerSecond / costPerLogicalPayment : 0;
     // Off-chain voucher plane: every logical payment is a voucher the session service must Ed25519-verify.
     // Vanilla transfers carry no vouchers, so only the on-chain ceiling applies there.
-    const perPaymentVerify = requiresPerPaymentVerify(inputs.mode);
+    const perPaymentVerify = requiresPerPaymentVerify(inputs.mode, inputs.scheme);
     const voucherVerifyCeiling = perPaymentVerify ? inputs.voucherVerifyPerSecond : Infinity;
     // A path sustains only as fast as its tightest stage: on-chain execution or off-chain verification.
     const sustainableCeiling = Math.min(maximumPaymentsPerSecond, voucherVerifyCeiling);
@@ -801,39 +809,43 @@ export function App() {
             const merged = { ...previous, ...params };
             return {
                 ...merged,
-                checkpointBatchSize: Math.min(merged.checkpointBatchSize, checkpointMaxBatch(merged.mode, merged.largeTx)),
+                checkpointBatchSize: Math.min(merged.checkpointBatchSize, checkpointMaxBatch(merged.scheme, merged.largeTx)),
             };
         });
     };
 
-    const selectMode = (mode: ModelMode) => {
-        if (mode === inputs.mode) return;
+    const activeBaseMethod = baseMethodOf(inputs.mode);
+    const activeScheme = inputs.scheme;
 
+    // Base rail: vanilla / v1 / v2. Selecting vanilla clears any scheme (vanilla carries no vouchers);
+    // switching between v1 and v2 keeps the scheme (the scheme is orthogonal to the base).
+    const selectBaseMethod = (base: BaseMethod) => {
+        const mode: ModelMode = base === 'vanilla' ? 'vanilla' : base === 'v1' ? 'channel-v1' : 'channel-v2';
+        if (mode === inputs.mode) return;
         const transferCostUnits =
             inputs.transferKind === 'spl-token' ? SPL_TOKEN_TRANSFER_COST_UNITS : TOKEN_2022_TRANSFER_COST_UNITS;
-        // Reset the checkpoint batch to the target mode's natural default (x402 packs 5 under a 1,232-byte
-        // tx; mpp-operator packs 59 distinct customers under ADR-004). Non-checkpoint modes ignore it, so
-        // leave it untouched for them.
-        const checkpointBatchSize = isCheckpointMode(mode)
-            ? mode === 'mpp-operator'
-                ? MPP_CHECKPOINT_DEFAULT_BATCH
-                : X402_CHECKPOINT_DEFAULT_BATCH
-            : inputs.checkpointBatchSize;
-        setInputs(previous => ({ ...previous, checkpointBatchSize, mode, transferCostUnits }));
+        setInputs(previous => ({
+            ...previous,
+            mode,
+            scheme: mode === 'vanilla' ? 'none' : previous.scheme,
+            transferCostUnits,
+        }));
     };
-
-    const activeBaseMethod = baseMethodOf(inputs.mode);
-    const activeScheme = schemeOf(inputs.mode);
-
-    // Base rail: vanilla / v1 / v2. Selecting a base drops any settlement scheme (a plain rail).
-    const selectBaseMethod = (base: BaseMethod) => {
-        selectMode(base === 'vanilla' ? 'vanilla' : base === 'v1' ? 'channel-v1' : 'channel-v2');
-    };
-    // Settlement scheme: x402 (client-signed) or MPP (operator-signed). Both are v2-persistent constructs,
-    // so selecting one promotes the base to v2; clicking the active scheme again collapses back to plain v2.
+    // Settlement scheme: x402 (client-signed) or MPP (operator-signed), layered on the current channel base
+    // (does NOT change v1/v2). Clicking the active scheme again clears it back to a plain channel. Selecting
+    // a scheme resets the checkpoint batch to that scheme's natural default but does NOT auto-enable the
+    // checkpoint cadence — checkpoints stay opt-in via the cadence knob.
     const selectScheme = (scheme: 'x402' | 'mpp') => {
-        const target: ModelMode = scheme === 'x402' ? 'x402-batch' : 'mpp-operator';
-        selectMode(activeScheme === scheme ? 'channel-v2' : target);
+        setInputs(previous => {
+            const nextScheme: SettlementScheme = previous.scheme === scheme ? 'none' : scheme;
+            const checkpointBatchSize =
+                nextScheme === 'mpp'
+                    ? MPP_CHECKPOINT_DEFAULT_BATCH
+                    : nextScheme === 'x402'
+                      ? X402_CHECKPOINT_DEFAULT_BATCH
+                      : previous.checkpointBatchSize;
+            return { ...previous, checkpointBatchSize, scheme: nextScheme };
+        });
     };
 
     const selectTransferKind = (transferKind: TransferKind) => {
@@ -1061,7 +1073,7 @@ export function App() {
                         </small>
                     </div>
                 )}
-                {inputs.mode === 'mpp-operator' && (
+                {inputs.scheme === 'mpp' && (
                     <div className="capacity-equation">
                         <span>Voucher plane</span>
                         <strong>
@@ -1082,7 +1094,7 @@ export function App() {
                         </small>
                     </div>
                 )}
-                {isCheckpointMode(inputs.mode) && checkpointsEnabled && (
+                {checkpointsEnabled && (
                     <div className="capacity-equation">
                         <span>Enforceability checkpoints</span>
                         <strong>
@@ -1091,8 +1103,8 @@ export function App() {
                             of budget)
                         </strong>
                         <small>
-                            {inputs.mode === 'mpp-operator'
-                                ? `One operator signer means ADR-004 batches ${formatInteger(inputs.checkpointBatchSize)} distinct customers into a single signed settle (n ≤ ${MPP_CHECKPOINT_MAX_BATCH}, account-bound), so each checkpoint is ~${formatInteger(checkpointCostPerChannel('mpp-operator', inputs.checkpointBatchSize))} CU/channel versus ~${formatInteger(checkpointCostPerChannel('x402-batch', X402_CHECKPOINT_DEFAULT_BATCH))} for client-signed — the same enforceability at a fraction of the on-chain cost, with no verify fleet. Interim settles run on top of the cash-sweep boundary; disable the checkpoint cadence to collapse this mode to plain v2.`
+                            {inputs.scheme === 'mpp'
+                                ? `One operator signer means ADR-004 batches ${formatInteger(inputs.checkpointBatchSize)} distinct customers into a single signed settle (n ≤ ${MPP_CHECKPOINT_MAX_BATCH}, account-bound), so each checkpoint is ~${formatInteger(checkpointCostPerChannel('mpp', inputs.checkpointBatchSize))} CU/channel versus ~${formatInteger(checkpointCostPerChannel('x402', X402_CHECKPOINT_DEFAULT_BATCH))} for client-signed — the same enforceability at a fraction of the on-chain cost, with no verify fleet. Interim settles run on top of the cash-sweep boundary; disable the checkpoint cadence to collapse this mode to plain v2.`
                                 : `Client-signed vouchers are made enforceable by interim settles that pack [Ed25519, settle] pairs, ${formatInteger(inputs.checkpointBatchSize)}/tx (size-bound at n ≤ ${X402_CHECKPOINT_MAX_BATCH} under a 4kB tx). Distinct customer signers → no ADR-004 batching, so this plane consumes on-chain budget independently of the off-chain verify fleet. Interim settles run on top of the cash-sweep boundary; disable the checkpoint cadence to collapse this mode to plain v2.`}
                         </small>
                     </div>
@@ -1131,7 +1143,7 @@ export function App() {
                         On-chain uses {formatPercent(budgetSharePercent)} of the available scheduler budget
                         {perPaymentVerify
                             ? `; off-chain uses ${formatPercent(voucherVerifySharePercent)} of the ${formatCompact(voucherVerifyCeiling, 2)} vouchers/s Ed25519 budget`
-                            : inputs.mode === 'mpp-operator'
+                            : inputs.scheme === 'mpp'
                               ? '; off-chain has no per-payment verification (operator-signed)'
                               : ''}
                         .
@@ -1290,7 +1302,7 @@ export function App() {
                                     step={1}
                                     value={inputs.reclaimBatchSize}
                                 />
-                                {isCheckpointMode(inputs.mode) && (
+                                {hasCheckpointScheme && (
                                     <>
                                         <SelectKnob
                                             help="Cadence of interim enforceability settles between cash sweeps. Disabled = plain v2 (no checkpoints)."
@@ -1303,12 +1315,12 @@ export function App() {
                                             disabled={!checkpointsEnabled}
                                             format={value => `${value} settles / tx`}
                                             help={
-                                                inputs.mode === 'mpp-operator'
+                                                inputs.scheme === 'mpp'
                                                     ? 'ADR-004: distinct customers under one operator signer, account-bound (≤ 59)'
                                                     : 'Packed [Ed25519, settle] pairs, size-bound (5 today; ≤ 16 under a 4kB tx)'
                                             }
                                             label="Checkpoint batch (n)"
-                                            max={checkpointMaxBatch(inputs.mode, inputs.largeTx)}
+                                            max={checkpointMaxBatch(inputs.scheme, inputs.largeTx)}
                                             min={1}
                                             onChange={value => updateInput('checkpointBatchSize', value)}
                                             step={1}
@@ -1327,7 +1339,7 @@ export function App() {
                                                 <span>Top-up</span>
                                                 <strong>{formatInteger(TOP_UP_COST_UNITS)} units / session</strong>
                                             </div>
-                                            {isCheckpointMode(inputs.mode) && checkpointsEnabled && (
+                                            {checkpointsEnabled && (
                                                 <>
                                                     <div>
                                                         <span>Checkpoint cost / channel</span>
@@ -1528,7 +1540,7 @@ export function App() {
                     </div>
                     <div className="opex-comparison">
                         <article className="opex-rail opex-rail-selected">
-                            <span>{MODE_LABELS[inputs.mode]}</span>
+                            <span>{settlementLabel(inputs.mode, inputs.scheme)}</span>
                             <strong>{formatUsd(networkFeeUsdPerSecond * SECONDS_PER_DAY)} / day</strong>
                             <small>{formatTakeRate(feeTakeRateBps)} network take-rate</small>
                         </article>
@@ -1634,10 +1646,10 @@ export function App() {
             <div className="opex-sticky" aria-label="Operating economics — live summary">
                 <div className="opex-sticky-rail">
                     <span className="opex-sticky-eyebrow">OpEx</span>
-                    <span className="opex-sticky-label">{MODE_LABELS[inputs.mode]}</span>
+                    <span className="opex-sticky-label">{settlementLabel(inputs.mode, inputs.scheme)}</span>
                     <span className={`opex-sticky-verdict ${canHandleDemand ? 'pass' : 'over'}`}>
                         {canHandleDemand
-                            ? 'fits 10M'
+                            ? `fits ${formatCompact(logicalRequestsPerSecond, 2)} req/s`
                             : `${formatCompact(logicalRequestsPerSecond / Math.max(sustainableCeiling, 1), 2)}× over`}
                     </span>
                 </div>
