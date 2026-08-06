@@ -1517,33 +1517,29 @@ export function App() {
                 key={pinnedScenarioKey}
             >
                 <div className="opex-sticky-rail">
-                    <span className="opex-sticky-eyebrow">{pinnedHorizon} · OpEx</span>
-                    <span className="opex-sticky-label">{settlementLabel(inputs.mode, inputs.scheme)}</span>
+                    <div className="opex-sticky-identity">
+                        <span className="opex-sticky-eyebrow">{pinnedHorizon} scenario</span>
+                        <strong className="opex-sticky-label">{settlementLabel(inputs.mode, inputs.scheme)}</strong>
+                    </div>
                     <span className={`opex-sticky-verdict ${canHandleDemand ? 'pass' : 'over'}`}>
                         {canHandleDemand
-                            ? `fits ${formatCompact(logicalRequestsPerSecond, 2)} req/s`
+                            ? `Ready for ${formatCompact(logicalRequestsPerSecond, 2)} payments/s`
                             : `${formatCompact(logicalRequestsPerSecond / Math.max(sustainableCeiling, 1), 2)}× over`}
                     </span>
                 </div>
                 <div className="opex-sticky-metrics">
+                    <div className="opex-sticky-primary">
+                        <span>All-in opex</span>
+                        <strong>{formatUsd(totalOpexUsdPerYear)}/yr</strong>
+                    </div>
                     <div>
                         <span>Network fees</span>
                         <strong>{formatUsd(networkFeeUsdPerSecond * SECONDS_PER_DAY)}/day</strong>
                     </div>
                     <div>
-                        <span>All-in opex</span>
-                        <strong>{formatUsd(totalOpexUsdPerYear)}/yr</strong>
-                    </div>
-                    <div>
-                        <span>All-in take-rate</span>
+                        <span>Take-rate</span>
                         <strong>{formatTakeRate(allInTakeRateBps)}</strong>
                     </div>
-                    {isChannel && (
-                        <div>
-                            <span>Escrow float</span>
-                            <strong>{formatUsd(escrowFloatUsd)}</strong>
-                        </div>
-                    )}
                     <div>
                         <span>On-chain budget</span>
                         <strong>{formatPercent(budgetSharePercent)}</strong>
