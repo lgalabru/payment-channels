@@ -9,7 +9,6 @@ interface ModelInputs {
     mode: ModelMode;
     reclaimBatchSize: number;
     rentPerChannelSol: number;
-    settlementBatchSize: number;
     slotMs: number;
     transferCostUnits: number;
     transferKind: TransferKind;
@@ -19,6 +18,7 @@ interface ModelInputs {
 interface DemandInputs {
     averageRequestsPerMinutePerUser: number;
     averageTransactionValueUsd: number;
+    channelLifetimeSeconds: number;
     settlementClockSeconds: number;
     users: number;
 }
@@ -70,10 +70,13 @@ const SPL_TOKEN_TRANSFER_COST_UNITS = 1_911;
 const TOKEN_2022_TRANSFER_COST_UNITS = 6_536;
 const V1_LIFECYCLE_COST_UNITS = 61_622;
 const STANDALONE_RECLAIM_COST_UNITS = 1_661;
-// open p50 (36,086) + bundled no-voucher settle_and_seal + TERMINAL distribute (~21,300; refund,
-// dust sweep, escrow close — not the interim OPEN-state payout the earlier 54,325 was built on) +
-// standalone reclaim (1,661). See MODEL_REVIEW.md finding 3.
-const V2_NO_VOUCHER_LIFECYCLE_COST_UNITS = 59_047;
+// ADR-005 channel re-arm (v2, proposed — not implemented). A persistent channel pays a cheap
+// rearm+top_up at each session boundary instead of a full open+close+reclaim; the one-time channel
+// build/teardown amortizes over K sessions. Planning envelope from docs/005-channel-rearm.md.
+const REARM_COST_UNITS = 19_000; // payee+feepayer sigs, ed25519 voucher, 7 locks, distribute-shape exec + refund leg
+const TOP_UP_COST_UNITS = 10_200; // 720 + 4 locks + 8,267 measured exec
+const SESSION_BOUNDARY_V2_COST_UNITS = REARM_COST_UNITS + TOP_UP_COST_UNITS; // 29,200 per session
+const V2_CHANNEL_OVERHEAD_COST_UNITS = 58_134; // open 36,086 + terminal close ~21,300 + reclaim 748, once per channel life
 const USER_STEPS = [0, 1, 10, 100, 1_000, 10_000, 100_000, 1_000_000, 10_000_000, 100_000_000] as const;
 const SETTLEMENT_CLOCK_OPTIONS = [
     { label: 'Disabled', value: 0 },
@@ -101,6 +104,7 @@ const SETTLEMENT_CLOCK_OPTIONS = [
 const DEFAULT_DEMAND: DemandInputs = {
     averageRequestsPerMinutePerUser: 60,
     averageTransactionValueUsd: 0.001,
+    channelLifetimeSeconds: 86_400,
     settlementClockSeconds: 60,
     users: 1_000_000,
 };
@@ -111,7 +115,6 @@ const TODAY: ModelInputs = {
     mode: 'channel-v1',
     reclaimBatchSize: 8,
     rentPerChannelSol: 0.00471192,
-    settlementBatchSize: 5,
     slotMs: 400,
     transferCostUnits: SPL_TOKEN_TRANSFER_COST_UNITS,
     transferKind: 'spl-token',
@@ -163,7 +166,7 @@ const PHASES: readonly Phase[] = [
 
 const MODE_LABELS: Readonly<Record<ModelMode, string>> = {
     'channel-v1': 'Payment channel v1',
-    'channel-v2': 'Payment channel v2',
+    'channel-v2': 'Payment channel v2 (ADR-005 re-arm)',
     vanilla: 'Vanilla transfer',
 };
 const MODE_ORDER: readonly ModelMode[] = ['vanilla', 'channel-v1', 'channel-v2'];
@@ -301,26 +304,19 @@ function SelectKnob({ disabled = false, help, label, onChange, options, value }:
     );
 }
 
-function v2SettlementCostPerChannel(batchSize: number): number {
-    return 890 + 3_420 / batchSize;
-}
-
 function reclaimCostPerChannel(batchSize: number): number {
     return 617 + 1_044 / batchSize;
 }
 
-function lifecycleCost(inputs: ModelInputs): number {
-    const reclaimCost = reclaimCostPerChannel(inputs.reclaimBatchSize);
+/** Scheduler cost of one settlement boundary (one session). `sessionsPerChannel` (K) only matters for v2. */
+function lifecycleCost(inputs: ModelInputs, sessionsPerChannel: number): number {
     if (inputs.mode === 'channel-v1') {
-        return V1_LIFECYCLE_COST_UNITS - STANDALONE_RECLAIM_COST_UNITS + reclaimCost;
+        // Full teardown/rebuild every session: open + settle_and_seal+distribute + (batched) reclaim.
+        return V1_LIFECYCLE_COST_UNITS - STANDALONE_RECLAIM_COST_UNITS + reclaimCostPerChannel(inputs.reclaimBatchSize);
     }
 
-    return (
-        V2_NO_VOUCHER_LIFECYCLE_COST_UNITS -
-        STANDALONE_RECLAIM_COST_UNITS +
-        reclaimCost +
-        v2SettlementCostPerChannel(inputs.settlementBatchSize)
-    );
+    // ADR-005: cheap rearm+top_up each session; the channel's open+close+reclaim is paid once per K sessions.
+    return SESSION_BOUNDARY_V2_COST_UNITS + V2_CHANNEL_OVERHEAD_COST_UNITS / Math.max(1, sessionsPerChannel);
 }
 
 type ArrivingDemandKey = 'averageRequestsPerMinutePerUser' | 'users';
@@ -399,11 +395,9 @@ function readSharedParams(): { demand: Partial<DemandInputs>; mode?: ModelMode }
     return { demand, mode: QUERY_TO_MODE[params.get('method') ?? ''] };
 }
 
-/** Apply a settlement method to model inputs, matching selectMode's batch defaults. */
+/** Apply a settlement method to model inputs. */
 function inputsForMode(base: ModelInputs, mode: ModelMode): ModelInputs {
-    const settlementBatchSize =
-        mode === 'channel-v1' ? Math.min(base.settlementBatchSize, 5) : mode === 'channel-v2' ? 59 : base.settlementBatchSize;
-    return { ...base, mode, settlementBatchSize };
+    return { ...base, mode };
 }
 
 export function App() {
@@ -444,16 +438,20 @@ export function App() {
         : 1;
     const paymentsPerChannel = requestsPerSettlement;
 
-    // Full happy-path lifecycle charged once per channel: open + settle_and_seal + distribute + reclaim.
-    const costPerLifecycle = isChannel ? lifecycleCost(inputs) : inputs.transferCostUnits;
-    // Session length = how long a channel accumulates vouchers before its single settle + close.
+    // Session length = how long a channel accumulates vouchers before its settlement boundary.
     const channelLifeSeconds = settlementClockEnabled
         ? demand.settlementClockSeconds
         : demand.averageRequestsPerMinutePerUser > 0
           ? 60 / demand.averageRequestsPerMinutePerUser
           : Infinity;
+    // K = sessions per channel. v1 tears down each session (K=1 effectively); ADR-005 v2 keeps the channel
+    // alive across the whole lifetime, so its build/teardown amortizes over lifetime ÷ session clock.
+    const sessionsPerChannel = settlementClockEnabled
+        ? Math.max(1, demand.channelLifetimeSeconds / demand.settlementClockSeconds)
+        : 1;
 
-    // Amortized chain cost of a single logical payment: one lifecycle spread over the payments it carried.
+    // Cost of one settlement boundary (one session), then amortized over the payments that session carried.
+    const costPerLifecycle = isChannel ? lifecycleCost(inputs, sessionsPerChannel) : inputs.transferCostUnits;
     const costPerLogicalPayment = isChannel ? costPerLifecycle / paymentsPerChannel : inputs.transferCostUnits;
 
     const maximumPaymentsPerSecond = costPerLogicalPayment > 0 ? availableBudgetPerSecond / costPerLogicalPayment : 0;
@@ -479,17 +477,20 @@ export function App() {
         availableBudgetPerSecond > 0 ? (requiredBudgetPerSecond / availableBudgetPerSecond) * 100 : 0;
     const voucherVerifySharePercent = (logicalRequestsPerSecond / voucherVerifyCeiling) * 100;
 
-    const channelLifecyclesPerSecond = isChannel ? logicalRequestsPerSecond / paymentsPerChannel : 0;
-    // One on-chain settlement (settle_and_seal) per channel, at close.
-    const settlementsPerSecond = channelLifecyclesPerSecond;
-    // Each lifecycle lands an open, a terminal settle_and_seal+distribute, and a (batchable) reclaim.
-    const physicalTransactionsPerSecond = isChannel
-        ? channelLifecyclesPerSecond + // open, one channel / tx
-          channelLifecyclesPerSecond + // terminal settle_and_seal + distribute, one channel / tx
-          channelLifecyclesPerSecond / inputs.reclaimBatchSize + // batched reclaim
-          // v2 only: one ADR-004 batch-settle tx per settlementBatchSize channels (v1 has no interim settle).
-          (inputs.mode === 'channel-v2' ? channelLifecyclesPerSecond / inputs.settlementBatchSize : 0)
-        : logicalRequestsPerSecond;
+    // One settlement boundary per session (a settle_and_seal close in v1, a rearm in v2).
+    const sessionsPerSecond = isChannel ? logicalRequestsPerSecond / paymentsPerChannel : 0;
+    const channelLifecyclesPerSecond = sessionsPerSecond;
+    const settlementsPerSecond = sessionsPerSecond;
+    // Channel builds+teardowns per second: every session in v1; once per K sessions with ADR-005 re-arm.
+    const channelBuildsPerSecond = inputs.mode === 'channel-v2' ? sessionsPerSecond / sessionsPerChannel : sessionsPerSecond;
+    const physicalTransactionsPerSecond = !isChannel
+        ? logicalRequestsPerSecond
+        : inputs.mode === 'channel-v1'
+          ? sessionsPerSecond + // open
+            sessionsPerSecond + // terminal settle_and_seal + distribute
+            sessionsPerSecond / inputs.reclaimBatchSize // batched reclaim
+          : sessionsPerSecond * 2 + // rearm + top_up per session
+            channelBuildsPerSecond * (2 + 1 / inputs.reclaimBatchSize); // amortized open + close + batched reclaim
     const liveChannels = isChannel ? demand.users : 0;
     const rentWorkingCapital = liveChannels * inputs.rentPerChannelSol;
     const grossValuePerSecondUsd = logicalRequestsPerSecond * demand.averageTransactionValueUsd;
@@ -531,10 +532,9 @@ export function App() {
     const selectMode = (mode: ModelMode) => {
         if (mode === inputs.mode) return;
 
-        const settlementBatchSize = mode === 'channel-v1' ? Math.min(inputs.settlementBatchSize, 5) : 59;
         const transferCostUnits =
             inputs.transferKind === 'spl-token' ? SPL_TOKEN_TRANSFER_COST_UNITS : TOKEN_2022_TRANSFER_COST_UNITS;
-        setInputs(previous => ({ ...previous, mode, settlementBatchSize, transferCostUnits }));
+        setInputs(previous => ({ ...previous, mode, transferCostUnits }));
         setIsCustomized(true);
     };
 
@@ -674,8 +674,8 @@ export function App() {
                                 {mode === 'vanilla'
                                     ? 'one on-chain tx / payment'
                                     : mode === 'channel-v1'
-                                      ? 'single-channel vouchers'
-                                      : 'ADR-004 batch vouchers'}
+                                      ? 'open + close every session'
+                                      : 'persistent channel, re-arm per session'}
                             </small>
                         </button>
                     ))}
@@ -879,6 +879,22 @@ export function App() {
                                     step={0.000000001}
                                     value={inputs.rentPerChannelSol}
                                 />
+                                {inputs.mode === 'channel-v2' && (
+                                    <RangeKnob
+                                        format={value =>
+                                            value >= 86_400
+                                                ? `${(value / 86_400).toFixed(1)}d`
+                                                : `${Math.round(value / 3_600)}h`
+                                        }
+                                        help="ADR-005: how long a channel stays open across sessions before a real teardown"
+                                        label="Channel lifetime"
+                                        max={604_800}
+                                        min={3_600}
+                                        onChange={value => updateDemand('channelLifetimeSeconds', value)}
+                                        step={3_600}
+                                        value={demand.channelLifetimeSeconds}
+                                    />
+                                )}
                                 <div className="batch-table">
                                     <div>
                                         <span>Payments / channel (derived)</span>
@@ -889,19 +905,25 @@ export function App() {
                                         <strong>{formatCompact(costPerLogicalPayment, 2)} units</strong>
                                     </div>
                                     <div>
-                                        <span>Channel life (session)</span>
+                                        <span>Session window</span>
                                         <strong>
                                             {Number.isFinite(channelLifeSeconds)
                                                 ? `${formatCompact(channelLifeSeconds, 2)} s`
                                                 : '∞'}
                                         </strong>
                                     </div>
+                                    {inputs.mode === 'channel-v2' && (
+                                        <div>
+                                            <span>Sessions / channel (K)</span>
+                                            <strong>{formatCompact(sessionsPerChannel, 2)}</strong>
+                                        </div>
+                                    )}
                                     <div>
-                                        <span>Channel opens+closes</span>
-                                        <strong>{formatCompact(channelLifecyclesPerSecond, 2)} / second</strong>
+                                        <span>{inputs.mode === 'channel-v2' ? 'Channel builds+teardowns' : 'Channel opens+closes'}</span>
+                                        <strong>{formatCompact(channelBuildsPerSecond, 2)} / second</strong>
                                     </div>
                                     <div>
-                                        <span>Settlement rate</span>
+                                        <span>{inputs.mode === 'channel-v2' ? 'Re-arm rate' : 'Settlement rate'}</span>
                                         <strong>{formatCompact(settlementsPerSecond, 2)} / second</strong>
                                     </div>
                                     <div>
@@ -913,18 +935,6 @@ export function App() {
 
                             <div className="knob-card">
                                 <h3>Instruction batching</h3>
-                                {inputs.mode === 'channel-v2' && (
-                                    <RangeKnob
-                                        format={value => `${value} channels / tx`}
-                                        help="One ADR-004 commitment batches many channels' settles; account-bound (≤59)"
-                                        label="Settlement batch"
-                                        max={59}
-                                        min={1}
-                                        onChange={value => updateInput('settlementBatchSize', value)}
-                                        step={1}
-                                        value={inputs.settlementBatchSize}
-                                    />
-                                )}
                                 <RangeKnob
                                     format={value => `${value} instructions / tx`}
                                     help="Observed current program batching: 8"
@@ -936,32 +946,42 @@ export function App() {
                                     value={inputs.reclaimBatchSize}
                                 />
                                 <div className="batch-table">
-                                    <div>
-                                        <span>Open</span>
-                                        <strong>1 channel / tx</strong>
-                                    </div>
-                                    <div>
-                                        <span>Terminal distribute</span>
-                                        <strong>1 channel / tx</strong>
-                                    </div>
-                                    {inputs.mode === 'channel-v2' && (
-                                        <div>
-                                            <span>Batch settle cost</span>
-                                            <strong>
-                                                {formatInteger(v2SettlementCostPerChannel(inputs.settlementBatchSize))}{' '}
-                                                units / channel
-                                            </strong>
-                                        </div>
+                                    {inputs.mode === 'channel-v2' ? (
+                                        <>
+                                            <div>
+                                                <span>Re-arm</span>
+                                                <strong>{formatInteger(REARM_COST_UNITS)} units / session</strong>
+                                            </div>
+                                            <div>
+                                                <span>Top-up</span>
+                                                <strong>{formatInteger(TOP_UP_COST_UNITS)} units / session</strong>
+                                            </div>
+                                            <div>
+                                                <span>Build+teardown</span>
+                                                <strong>once / {formatCompact(sessionsPerChannel, 2)} sessions</strong>
+                                            </div>
+                                        </>
+                                    ) : (
+                                        <>
+                                            <div>
+                                                <span>Open</span>
+                                                <strong>1 channel / tx</strong>
+                                            </div>
+                                            <div>
+                                                <span>Terminal distribute</span>
+                                                <strong>1 channel / tx</strong>
+                                            </div>
+                                        </>
                                     )}
                                     <div>
-                                        <span>Lifecycle cost</span>
+                                        <span>{inputs.mode === 'channel-v2' ? 'Boundary cost / session' : 'Lifecycle cost'}</span>
                                         <strong>{formatInteger(costPerLifecycle)} units / channel</strong>
                                     </div>
                                 </div>
                                 <p className="batch-caveat">
                                     {inputs.mode === 'channel-v1'
                                         ? 'One channel = one session: open, a single settle_and_seal + distribute at idle-close, and a batched reclaim. Payments/channel is derived from the session window × request rate (capped by escrow deposit ÷ payment value), so longer sessions amortize the fixed open+distribute over more payments. Lengthen the session clock until the verdict fits the target — the crossover scales linearly with it.'
-                                        : 'ADR-004 batches many channels’ settles into one transaction — proposed, not benchmarked. It shrinks the per-channel settle, but open and terminal distribute still dominate the lifecycle.'}
+                                        : 'ADR-005 re-arm (proposed, not benchmarked): the channel stays open across sessions, so each session pays only a cheap rearm+top_up (~29.2k units) instead of a full open+close+reclaim (~60.7k). The one-time build/teardown amortizes over K = lifetime ÷ session window, so raising Channel lifetime drives the boundary cost toward just the rearm. This attacks the fixed toll that forces long windows — the capital-recycling plane of the decoupled architecture, not a per-payment saving.'}
                                 </p>
                             </div>
 
@@ -1036,7 +1056,7 @@ export function App() {
                     <strong>
                         {isChannel ? formatCompact(settlementsPerSecond, 2) : formatInteger(inputs.transferCostUnits)}
                     </strong>
-                    <small>{isChannel ? 'terminal settlements / second (one per channel close)' : 'scheduler units'}</small>
+                    <small>{isChannel ? 'settlement boundaries / second (one per session)' : 'scheduler units'}</small>
                 </article>
                 <article className="metric-card">
                     <span>{isChannel ? 'Concurrent live channels' : 'Required scheduler load'}</span>
