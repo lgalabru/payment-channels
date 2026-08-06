@@ -362,6 +362,11 @@ export function App() {
 
     const activeBaseMethod = baseMethodOf(inputs.mode);
     const activeScheme = inputs.scheme;
+    const pinnedHorizon =
+        preset?.horizon === 'longterm' ? 'Long-term' : preset?.horizon === 'today' ? 'Today' : 'Custom';
+    // The sticky bar is a composited layer in browsers. Remount it when the preset rail changes so
+    // its painted text cannot lag behind the already-updated reducer/model state.
+    const pinnedScenarioKey = `${pinnedHorizon}:${inputs.mode}:${inputs.scheme}:${activeSimds.join(',')}`;
 
     const selectBaseMethod = (base: BaseMethod) => {
         dispatch({ base, type: 'select-base' });
@@ -1504,9 +1509,15 @@ export function App() {
                 </p>
             </section>
 
-            <div className="opex-sticky" aria-label="Operating economics — live summary">
+            <div
+                aria-label="Operating economics — live summary"
+                aria-live="polite"
+                className="opex-sticky"
+                data-horizon={pinnedHorizon}
+                key={pinnedScenarioKey}
+            >
                 <div className="opex-sticky-rail">
-                    <span className="opex-sticky-eyebrow">OpEx</span>
+                    <span className="opex-sticky-eyebrow">{pinnedHorizon} · OpEx</span>
                     <span className="opex-sticky-label">{settlementLabel(inputs.mode, inputs.scheme)}</span>
                     <span className={`opex-sticky-verdict ${canHandleDemand ? 'pass' : 'over'}`}>
                         {canHandleDemand

@@ -84,6 +84,27 @@ test('preset toggle sequence is atomic and objectives do not silently change the
     assert.ok(result.enforceableFinalitySeconds < state.demand.settlementClockSeconds);
 });
 
+test('horizon switches change and restore the pinned economics summary', () => {
+    const today = createInitialState();
+    const longterm = appReducer(today, { patch: { horizon: 'longterm' }, type: 'select-preset' });
+    const restored = appReducer(longterm, { patch: { horizon: 'today' }, type: 'select-preset' });
+    const summary = (state: typeof today) => {
+        const result = evaluateModel(state.inputs, state.demand);
+        return {
+            budgetSharePercent: result.budgetSharePercent,
+            networkFeeUsdPerSecond: result.networkFeeUsdPerSecond,
+            totalOpexUsdPerYear: result.totalOpexUsdPerYear,
+        };
+    };
+
+    const todaySummary = summary(today);
+    const longtermSummary = summary(longterm);
+    assert.notEqual(longtermSummary.budgetSharePercent, todaySummary.budgetSharePercent);
+    assert.notEqual(longtermSummary.networkFeeUsdPerSecond, todaySummary.networkFeeUsdPerSecond);
+    assert.notEqual(longtermSummary.totalOpexUsdPerYear, todaySummary.totalOpexUsdPerYear);
+    assert.deepEqual(summary(restored), todaySummary);
+});
+
 test('manual edits clear the preset in the same transition', () => {
     const state = appReducer(createInitialState(), {
         key: 'averageTransactionValueUsd',
