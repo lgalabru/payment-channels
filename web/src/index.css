@@ -4,26 +4,20 @@
 
 :root {
     color-scheme: dark;
-    font-family:
-        Inter,
-        ui-sans-serif,
-        -apple-system,
-        BlinkMacSystemFont,
-        'Segoe UI',
-        sans-serif;
+    font-family: 'ABC Diatype', 'Helvetica Neue', Arial, sans-serif;
     font-synthesis: none;
     text-rendering: optimizeLegibility;
-    --accent: #f6821f;
-    --accent-dim: #3f2616;
-    --background: #141414;
-    --border: #353535;
-    --border-strong: #525252;
-    --danger: #ffb09b;
-    --muted: #a8a29f;
-    --panel: #171717;
-    --panel-raised: #1c1c1c;
-    --success: #b8e8c7;
-    --text: #f7f3f0;
+    --accent: #b3ed71;
+    --accent-dim: rgba(179, 237, 113, 0.12);
+    --background: #000;
+    --border: rgba(255, 255, 255, 0.08);
+    --border-strong: #2e2e2e;
+    --danger: #f07d5a;
+    --muted: #a6a6a6;
+    --panel: #0e0e0e;
+    --panel-raised: #161616;
+    --success: #7fec86;
+    --text: #fff;
 }
 
 body {
@@ -1616,4 +1610,315 @@ footer p {
     background: var(--accent-dim);
     border-color: var(--accent);
     color: var(--accent);
+}
+
+/* Shared pay.sh visual language: a restrained black grid with lime only for live state. */
+body {
+    background: #000;
+    background-image: none;
+}
+
+.app-shell {
+    background-color: #000;
+    background-image:
+        repeating-linear-gradient(to right, transparent 0 359px, rgba(255, 255, 255, 0.08) 359px 360px),
+        repeating-linear-gradient(to bottom, transparent 0 119px, rgba(255, 255, 255, 0.035) 119px 120px);
+    border-color: var(--border);
+    max-width: 1440px;
+    padding: 0 28px 48px;
+}
+
+.hero {
+    border-bottom: 1px solid var(--border);
+    border-top: 1px solid var(--border);
+    gap: 40px;
+    margin: 0 -28px 24px;
+    padding: 56px 52px 44px;
+}
+
+.eyebrow,
+.section-index,
+.opex-sticky-eyebrow {
+    color: var(--accent);
+    font-family: 'ABC Schengen A Trial', 'SF Mono', 'SFMono-Regular', Consolas, monospace;
+    font-weight: 450;
+    letter-spacing: 0.08em;
+}
+
+h1 {
+    font-size: clamp(2.5rem, 4vw, 4rem);
+    font-weight: 500;
+    letter-spacing: -0.04em;
+    line-height: 1.05;
+}
+
+.lede {
+    font-size: 1rem;
+    max-width: 640px;
+}
+
+.target-chip {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-left: 1px solid var(--border);
+    min-width: 232px;
+    padding: 16px;
+}
+
+.target-chip span,
+.target-chip small,
+.metric-card span,
+.metric-card small,
+.preset-group-label {
+    font-family: 'ABC Schengen A Trial', 'SF Mono', 'SFMono-Regular', Consolas, monospace;
+    letter-spacing: 0.08em;
+}
+
+.panel,
+.metric-card,
+.knob-card,
+.opex-summary,
+.opex-total,
+.batch-table,
+.preset-verdict,
+.preset-pills,
+.opex-sticky {
+    border-radius: 2px;
+}
+
+.panel {
+    background: var(--panel);
+    border-color: var(--border);
+    margin-bottom: 20px;
+    padding: 24px;
+}
+
+.timeline-panel {
+    background-color: var(--panel);
+    background-image: repeating-linear-gradient(-45deg, #262626 0 1px, transparent 1px 7px);
+}
+
+.timeline-panel::after {
+    background: var(--panel);
+    opacity: 0.84;
+}
+
+.section-heading h2,
+.progress-heading h2 {
+    font-size: 1rem;
+    font-weight: 500;
+    letter-spacing: -0.02em;
+}
+
+.simd-card,
+.mode-switch,
+.transfer-toggle button,
+.number-input,
+.knob-card .select-knob select {
+    background: #161616;
+    border-color: var(--border);
+    border-radius: 2px;
+}
+
+.simd-card {
+    padding: 12px;
+}
+
+.simd-card:hover,
+.mode-switch button:hover,
+.transfer-toggle button:hover {
+    background: #1f1f1f;
+    border-color: #404040;
+}
+
+.simd-card.simd-on,
+.opex-rail-selected {
+    background: var(--accent-dim);
+    border-color: var(--accent);
+}
+
+.simd-status,
+.simd-tag,
+.opex-sticky-verdict,
+.preset-verdict,
+.preset-pills {
+    border-radius: 2px;
+}
+
+.mode-switch {
+    gap: 0;
+    padding: 0;
+}
+
+.mode-switch button {
+    border-radius: 0;
+    min-height: 68px;
+    padding: 12px 14px;
+}
+
+.mode-switch button + button {
+    border-left-color: var(--border);
+}
+
+.mode-switch button.active {
+    background: var(--accent-dim);
+    border-color: var(--accent);
+}
+
+.knob-card {
+    background: #161616;
+    border-color: var(--border);
+}
+
+.knob-card h3,
+.knob-card .select-knob > label,
+.demand-controls .select-knob > label {
+    color: var(--accent);
+    font-family: 'ABC Schengen A Trial', 'SF Mono', 'SFMono-Regular', Consolas, monospace;
+    font-weight: 450;
+}
+
+.progress-panel {
+    background-color: #0e0e0e;
+    background-image: repeating-linear-gradient(-45deg, #262626 0 1px, transparent 1px 7px);
+    border-color: var(--border);
+    color: var(--text);
+}
+
+.progress-panel::before {
+    display: none;
+}
+
+.progress-panel .section-index,
+.progress-panel .progress-scale,
+.progress-panel .progress-scale strong,
+.progress-panel .progress-legend,
+.progress-panel .capacity-equation strong,
+.progress-panel .verdict strong {
+    color: var(--text);
+}
+
+.demand-controls .knob,
+.demand-controls .number-input,
+.demand-controls output,
+.demand-controls select {
+    background: #161616;
+    border-color: var(--border);
+    color: var(--text);
+}
+
+.demand-controls .knob-meta span,
+.progress-number span,
+.capacity-equation small,
+.verdict span,
+.progress-scale,
+.progress-legend {
+    color: var(--muted);
+}
+
+.demand-controls input[type='range'] {
+    accent-color: var(--accent);
+}
+
+progress,
+progress::-webkit-progress-bar,
+.dual-progress {
+    background: #2e2e2e;
+    border-radius: 0;
+}
+
+progress::-webkit-progress-value,
+progress::-moz-progress-bar,
+.dual-progress-processed {
+    background: var(--accent);
+    border-radius: 0;
+}
+
+.dual-progress-arriving {
+    background: repeating-linear-gradient(-45deg, rgba(179, 237, 113, 0.7) 0 3px, rgba(179, 237, 113, 0.22) 3px 6px);
+    border-radius: 0;
+}
+
+.progress-legend i {
+    border-color: var(--border-strong);
+    border-radius: 0;
+}
+
+.progress-legend .legend-arriving i {
+    background: repeating-linear-gradient(-45deg, var(--accent) 0 3px, rgba(179, 237, 113, 0.3) 3px 6px);
+}
+
+.progress-legend .legend-processed i {
+    background: var(--accent);
+}
+
+.capacity-equation,
+.verdict {
+    border-color: var(--border);
+}
+
+.trust-badge {
+    background: var(--accent-dim);
+    border-color: var(--accent);
+    border-radius: 2px;
+    color: var(--accent);
+}
+
+.metric-card,
+.opex-summary,
+.opex-total {
+    background: #161616;
+    border-color: var(--border);
+}
+
+.opex-summary-heading span,
+.opex-group-heading span,
+.opex-total > div > span {
+    color: var(--accent);
+}
+
+.opex-sticky {
+    backdrop-filter: none;
+    background: #0e0e0e;
+    border-color: var(--border-strong);
+    box-shadow: none;
+}
+
+.opex-sticky-verdict.pass {
+    background: rgba(127, 236, 134, 0.1);
+}
+
+.opex-sticky-verdict.over {
+    background: rgba(240, 125, 90, 0.1);
+}
+
+.preset-panel {
+    gap: 20px;
+}
+
+.preset-pills {
+    background: #161616;
+    padding: 2px;
+}
+
+.preset-pills button,
+.preset-pills button.active {
+    border-radius: 1px;
+}
+
+footer {
+    border-bottom: 0;
+    border-top: 1px solid var(--border);
+    padding: 24px;
+}
+
+@media (max-width: 700px) {
+    .app-shell {
+        padding: 0 16px 40px;
+    }
+
+    .hero {
+        margin: 0 -16px 20px;
+        padding: 36px 24px 32px;
+    }
 }
