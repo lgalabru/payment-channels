@@ -1376,6 +1376,133 @@ export function App() {
                 </p>
             </section>
 
+            <section aria-labelledby="how-it-works-title" className="panel explainer-panel">
+                <div className="section-heading">
+                    <div>
+                        <p className="section-index">05</p>
+                        <h2 id="how-it-works-title">How it works</h2>
+                    </div>
+                    <p>Payment channels compress a stream of logical payments into periodic on-chain state changes.</p>
+                </div>
+                <ol className="how-it-works-grid">
+                    <li>
+                        <span>01</span>
+                        <div>
+                            <strong>Authorize a payment</strong>
+                            <p>A payer receives a paid request and issues an off-chain cumulative voucher.</p>
+                        </div>
+                    </li>
+                    <li>
+                        <span>02</span>
+                        <div>
+                            <strong>Accumulate value off-chain</strong>
+                            <p>
+                                Many vouchers update the same channel balance without each becoming a chain transaction.
+                            </p>
+                        </div>
+                    </li>
+                    <li>
+                        <span>03</span>
+                        <div>
+                            <strong>Settle a watermark</strong>
+                            <p>At the selected cash clock, the program advances the channel&rsquo;s OPEN watermark.</p>
+                        </div>
+                    </li>
+                    <li>
+                        <span>04</span>
+                        <div>
+                            <strong>Deliver or re-arm</strong>
+                            <p>
+                                Funds can be distributed, then the channel is topped up or recycled for the next window.
+                            </p>
+                        </div>
+                    </li>
+                </ol>
+                <div className="batch-explainer">
+                    <div>
+                        <span className="batch-explainer-label">Available today</span>
+                        <strong>One channel per checkpoint</strong>
+                        <p>
+                            Client-signed x402 vouchers pack a small number of [verify, settle] pairs in a transaction:
+                            five today, or 16 with a proposed 4 kB transaction limit.
+                        </p>
+                    </div>
+                    <div>
+                        <span className="batch-explainer-label">Long-term · ADR-004</span>
+                        <strong>Up to 59 channel updates per settle</strong>
+                        <p>
+                            An MPP operator can sign one batch for distinct customers. The 59 is an account-limit bound,
+                            not 59 instructions, and is intentionally unavailable in the today preset.
+                        </p>
+                    </div>
+                </div>
+            </section>
+
+            <section aria-labelledby="scaling-limits-title" className="panel scaling-panel">
+                <div className="section-heading">
+                    <div>
+                        <p className="section-index">06</p>
+                        <h2 id="scaling-limits-title">Scaling limits</h2>
+                    </div>
+                    <p>Amortization holds chain work roughly flat; time, capital, and operations take over.</p>
+                </div>
+                <div className="scaling-laws">
+                    <article>
+                        <span>Chain compute</span>
+                        <strong>Flat</strong>
+                        <p>About 4.3k settlements/s at the modeled 125M CU/s budget.</p>
+                    </article>
+                    <article>
+                        <span>Batch window</span>
+                        <strong>Linear</strong>
+                        <p>More logical payments need a proportionally longer cash window.</p>
+                    </article>
+                    <article>
+                        <span>Escrow float</span>
+                        <strong>Quadratic</strong>
+                        <p>Throughput × window: the capital requirement becomes the hard economic constraint.</p>
+                    </article>
+                </div>
+                <div className="scaling-table-wrap">
+                    <table>
+                        <caption>Illustrative persistent-channel envelope at $0.05/payment</caption>
+                        <thead>
+                            <tr>
+                                <th scope="col">Demand</th>
+                                <th scope="col">Minimum cash window</th>
+                                <th scope="col">Escrow float</th>
+                                <th scope="col">Verifier fleet</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <th scope="row">1M/s</th>
+                                <td>3.9 min</td>
+                                <td>~$0.03B</td>
+                                <td>~13 cores</td>
+                            </tr>
+                            <tr>
+                                <th scope="row">10M/s</th>
+                                <td>39 min</td>
+                                <td>~$1.2B</td>
+                                <td>~130 cores</td>
+                            </tr>
+                            <tr>
+                                <th scope="row">100M/s</th>
+                                <td>6.5 hr</td>
+                                <td>~$117B</td>
+                                <td>~1,300 cores</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+                <p className="scaling-note">
+                    Cash delivery is separately bounded: one merchant recipient account handles roughly 7,040 payouts/s,
+                    so higher rates need account fan-out or periodic delivery. The envelope assumes persistent channels;
+                    churn makes the economics worse.
+                </p>
+            </section>
+
             <div className="opex-sticky" aria-label="Operating economics — live summary">
                 <div className="opex-sticky-rail">
                     <span className="opex-sticky-eyebrow">OpEx</span>
@@ -1412,11 +1539,37 @@ export function App() {
                 </div>
             </div>
 
-            <footer>
-                <p>
-                    Mainnet scheduler costs: SPL Token 1,911 · Token-2022 6,536 · channel lifecycle 60,709 with reclaim
-                    batch 8 (61,622 with standalone reclaim). Channel v2 remains an ADR-005 planning envelope.
-                </p>
+            <footer className="site-footer">
+                <div className="site-footer-band">
+                    <div className="site-footer-brand">
+                        <div className="foundation-mark" aria-label="Solana Foundation" role="img">
+                            <svg aria-hidden="true" fill="none" viewBox="0 0 18 16">
+                                <path d="M17.91 12.61 14.94 15.78a.72.72 0 0 1-.5.22H.34a.34.34 0 0 1-.25-.56l2.98-3.18a.72.72 0 0 1 .5-.22h14.09a.34.34 0 0 1 .25.57ZM14.94 6.24a.72.72 0 0 0-.5-.22H.34a.34.34 0 0 0-.25.57l2.98 3.17a.72.72 0 0 0 .5.22h14.09a.34.34 0 0 0 .25-.57ZM.34 3.96h14.09a.72.72 0 0 0 .5-.22L17.91.58A.34.34 0 0 0 17.66 0H3.57a.72.72 0 0 0-.5.22L.09 3.39a.34.34 0 0 0 .25.57Z" />
+                            </svg>
+                            <span>Solana Foundation</span>
+                        </div>
+                        <p>
+                            Mainnet scheduler costs: SPL Token 1,911 · Token-2022 6,536 · channel lifecycle 60,709 with
+                            reclaim batch 8. Channel v2 remains an ADR-005 planning envelope.
+                        </p>
+                    </div>
+                    <nav aria-label="Payment channel resources" className="site-footer-links">
+                        <a href="https://pay.sh" rel="noopener noreferrer" target="_blank">
+                            pay.sh <span aria-hidden="true">↗</span>
+                        </a>
+                        <a href="https://github.com/solana-foundation/pay" rel="noopener noreferrer" target="_blank">
+                            brew install pay <span aria-hidden="true">↗</span>
+                        </a>
+                        <a
+                            href="https://github.com/solana-foundation/pay-kit"
+                            rel="noopener noreferrer"
+                            target="_blank"
+                        >
+                            build with pay-kit <span aria-hidden="true">↗</span>
+                        </a>
+                    </nav>
+                </div>
+                <div aria-hidden="true" className="site-footer-tail" />
             </footer>
         </main>
     );
