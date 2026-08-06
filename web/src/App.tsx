@@ -1,4 +1,4 @@
-import { useId, useState } from 'react';
+import { useEffect, useId, useState } from 'react';
 
 type ModelMode = 'vanilla' | 'channel-v1' | 'channel-v2';
 type TransferKind = 'spl-token' | 'token-2022';
@@ -355,11 +355,73 @@ function clampArrivingDemand(previous: DemandInputs, key: ArrivingDemandKey, pro
 }
 
 /** Interactive capacity model backed by the report's measured scheduler costs. */
+const QUERY_TO_MODE: Readonly<Record<string, ModelMode>> = {
+    v1: 'channel-v1',
+    v2: 'channel-v2',
+    vanilla: 'vanilla',
+};
+const MODE_TO_QUERY: Readonly<Record<ModelMode, string>> = {
+    'channel-v1': 'v1',
+    'channel-v2': 'v2',
+    vanilla: 'vanilla',
+};
+
+/** Snap an arbitrary user count to the nearest discrete slider step. */
+function nearestUserStep(value: number): number {
+    return USER_STEPS.reduce(
+        (best, step) => (Math.abs(step - value) < Math.abs(best - value) ? step : best),
+        USER_STEPS[0],
+    );
+}
+
+/** Seed demand + settlement method from the shareable `?users&rpm&clock&method` query. */
+function readSharedParams(): { demand: Partial<DemandInputs>; mode?: ModelMode } {
+    const demand: Partial<DemandInputs> = {};
+    if (typeof window === 'undefined') return { demand };
+    const params = new URLSearchParams(window.location.search);
+
+    const users = Number(params.get('users'));
+    if (params.has('users') && Number.isFinite(users)) demand.users = nearestUserStep(Math.max(0, users));
+
+    const rpm = Number(params.get('rpm'));
+    if (params.has('rpm') && Number.isFinite(rpm)) {
+        demand.averageRequestsPerMinutePerUser = Math.min(500, Math.max(0, Math.round(rpm)));
+    }
+
+    const clock = Number(params.get('clock'));
+    if (params.has('clock') && SETTLEMENT_CLOCK_OPTIONS.some(option => option.value === clock)) {
+        demand.settlementClockSeconds = clock;
+    }
+
+    return { demand, mode: QUERY_TO_MODE[params.get('method') ?? ''] };
+}
+
+/** Apply a settlement method to model inputs, matching selectMode's batch defaults. */
+function inputsForMode(base: ModelInputs, mode: ModelMode): ModelInputs {
+    const settlementBatchSize =
+        mode === 'channel-v1' ? Math.min(base.settlementBatchSize, 5) : mode === 'channel-v2' ? 59 : base.settlementBatchSize;
+    return { ...base, mode, settlementBatchSize };
+}
+
 export function App() {
-    const [inputs, setInputs] = useState<ModelInputs>(TODAY);
-    const [demand, setDemand] = useState<DemandInputs>(DEFAULT_DEMAND);
+    const [inputs, setInputs] = useState<ModelInputs>(() => {
+        const { mode } = readSharedParams();
+        return mode ? inputsForMode(TODAY, mode) : TODAY;
+    });
+    const [demand, setDemand] = useState<DemandInputs>(() => ({ ...DEFAULT_DEMAND, ...readSharedParams().demand }));
     const [selectedPhaseId, setSelectedPhaseId] = useState('today');
     const [isCustomized, setIsCustomized] = useState(false);
+
+    // Mirror the four shareable knobs into the URL query so any configuration is linkable.
+    useEffect(() => {
+        if (typeof window === 'undefined') return;
+        const params = new URLSearchParams();
+        params.set('users', String(demand.users));
+        params.set('rpm', String(demand.averageRequestsPerMinutePerUser));
+        params.set('clock', String(demand.settlementClockSeconds));
+        params.set('method', MODE_TO_QUERY[inputs.mode]);
+        window.history.replaceState(null, '', `${window.location.pathname}?${params.toString()}${window.location.hash}`);
+    }, [demand, inputs.mode]);
 
     const blocksPerSecond = 1_000 / inputs.slotMs;
     const nominalBudgetPerSecond = inputs.blockCostUnits * blocksPerSecond;
