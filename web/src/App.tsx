@@ -1,58 +1,40 @@
-import { useEffect, useId, useState } from 'react';
+import { useEffect, useId, useReducer } from 'react';
+
+import {
+    appReducer,
+    CHANNEL_LIFETIME_OPTIONS,
+    createInitialState,
+    type PresetSelection,
+    SETTLEMENT_CLOCK_OPTIONS,
+    SIMDS,
+    USER_STEPS,
+} from './app-state';
+import {
+    BASE_FEE_LAMPORTS_PER_SIGNATURE,
+    checkpointCostPerChannel,
+    checkpointMaxBatch,
+    effectiveCheckpointBatchSize,
+    evaluateModel,
+    INTERIM_DISTRIBUTE_COST_UNITS,
+    type ModelMode,
+    MPP_CHECKPOINT_MAX_BATCH,
+    REARM_COST_UNITS,
+    requiresPerPaymentVerify,
+    SECONDS_PER_DAY,
+    SECONDS_PER_YEAR,
+    SESSION_BOUNDARY_V2_COST_UNITS,
+    SETTLE_COST_UNITS,
+    type SettlementScheme,
+    TOP_UP_COST_UNITS,
+    type TransferKind,
+    X402_CHECKPOINT_DEFAULT_BATCH,
+} from './model';
 
 // The settlement selector is a two-tier "stack": a base rail (vanilla / channel v1 / channel v2) and,
 // for channels, an independent settlement scheme (x402 client-signed, or MPP operator-signed). The two are
 // ORTHOGONAL — a scheme rides whichever base is selected (v1 or v2), it does not change the base. `mode`
 // carries the base only; `scheme` carries the voucher plane.
-type ModelMode = 'vanilla' | 'channel-v1' | 'channel-v2';
 type BaseMethod = 'vanilla' | 'v1' | 'v2';
-type SettlementScheme = 'none' | 'x402' | 'mpp';
-type TransferKind = 'spl-token' | 'token-2022';
-
-interface ModelInputs {
-    availableCapacityPercent: number;
-    blockCostUnits: number;
-    // Cadence of interim enforceability checkpoints, in seconds; 0 disables them (scheme reduces to a plain
-    // channel). Only meaningful when a scheme (x402 / mpp) is active.
-    checkpointClockSeconds: number;
-    // Channel-settles packed into one checkpoint tx (n in the per-scheme fit). Only read when a scheme is on.
-    checkpointBatchSize: number;
-    // Cost of the `open` instruction in CU. SIMD-0567 (p-ATA) cuts this from 36,086 to ~17,300; feeds the
-    // v1 lifecycle and the v2 amortized open. Extracted as an input so timeline SIMDs can move it.
-    openCostUnits: number;
-    mode: ModelMode;
-    // Off-chain settlement scheme layered on the channel base: 'none' (plain v1/v2), 'x402' (client-signed
-    // vouchers), or 'mpp' (operator-signed — no per-payment verify). Orthogonal to `mode`.
-    scheme: SettlementScheme;
-    reclaimBatchSize: number;
-    rentPerChannelSol: number;
-    slotMs: number;
-    // SIMD-0568 (precompile removal): drops the ed25519 signature fee on voucher-bearing settles, so a
-    // channel settle tx pays one base signature instead of two.
-    voucherSigFeeRemoved: boolean;
-    // SIMD-0296 / 0385 (4kB transactions): raises checkpoint packing — x402 5 → 16/tx, ADR-004 59 → 60.
-    largeTx: boolean;
-    transferCostUnits: number;
-    transferKind: TransferKind;
-    voucherVerifyPerSecond: number;
-}
-
-interface DemandInputs {
-    averageRequestsPerMinutePerUser: number;
-    averageTransactionValueUsd: number;
-    capitalCostAnnualPercent: number;
-    channelLifetimeSeconds: number;
-    priorityFeeLamportsPerTx: number;
-    settlementClockSeconds: number;
-    solPriceUsd: number;
-    users: number;
-    // Placeholder penalty for the OFF-CHAIN verify fleet: $ per million client Ed25519 voucher
-    // verifications. There is no benchmark yet, so this is a dial, not a measurement. It prices the
-    // per-payment hot-path a client-signed rail must run (parse voucher + verify sig + check watermark
-    // + persist), including HA/headroom. Only client-signed planes pay it — plain channels and x402;
-    // MPP operator-signed and vanilla have no per-payment client signature to verify, so it is $0 there.
-    voucherVerifyCostUsdPerMillion: number;
-}
 
 interface RangeKnobProps {
     readonly disabled?: boolean;
@@ -85,257 +67,7 @@ interface SelectKnobProps {
     readonly value: number;
 }
 
-const TARGET_PAYMENTS_PER_SECOND = 10_000_000;
-const LAMPORTS_PER_SOL = 1_000_000_000;
-const BASE_FEE_LAMPORTS_PER_SIGNATURE = 5_000;
-const SECONDS_PER_DAY = 86_400;
 const SECONDS_PER_MONTH = 2_592_000; // 30 days
-const SECONDS_PER_YEAR = 31_536_000; // 365 days
-const SPL_TOKEN_TRANSFER_COST_UNITS = 1_911;
-const TOKEN_2022_TRANSFER_COST_UNITS = 6_536;
-const V1_LIFECYCLE_COST_UNITS = 61_622;
-const STANDALONE_RECLAIM_COST_UNITS = 1_661;
-// ADR-005 channel re-arm (v2, proposed — not implemented). A persistent channel pays a cheap
-// rearm+top_up at each session boundary instead of a full open+close+reclaim; the one-time channel
-// build/teardown amortizes over K sessions. Planning envelope from docs/005-channel-rearm.md.
-const REARM_COST_UNITS = 19_000; // payee+feepayer sigs, ed25519 voucher, 7 locks, distribute-shape exec + refund leg
-const TOP_UP_COST_UNITS = 10_200; // 720 + 4 locks + 8,267 measured exec
-const SESSION_BOUNDARY_V2_COST_UNITS = REARM_COST_UNITS + TOP_UP_COST_UNITS; // 29,200 per session
-// One-time channel build/teardown, paid once per channel life (NOT per session). Over K sessions the
-// channel pays: 1 open + (K−1) rearm+top_up boundaries + 1 terminal close (carries the final voucher) +
-// 1 batched reclaim. This makes v2(K=1) == v1 exactly (zero re-arms occur) and v2 strictly cheaper for
-// K>1. Corrects the earlier flat 58,134/K form, which double-charged the last session for both a re-arm
-// and a terminal close (v2 read worse than v1 at K=1). See PR #81 commit d58ad41 and lifecycleCost().
-const V2_OPEN_COST_UNITS = 36_086; // baseline `open` cost (default ModelInputs.openCostUnits)
-// v1 lifecycle with the `open` instruction factored out, so timeline SIMDs can move open independently.
-const V1_LIFECYCLE_EX_OPEN_COST_UNITS = V1_LIFECYCLE_COST_UNITS - V2_OPEN_COST_UNITS; // 25,536
-const V2_TERMINAL_CLOSE_COST_UNITS = 23_875; // final settle_and_seal + distribute, carries the last voucher
-// Enforceability checkpoints (x402 / mpp schemes only). An interim settle that advances the
-// on-chain watermark so accumulated voucher value becomes claimable BETWEEN cash-sweep boundaries —
-// the "cheap + frequent" plane of the decoupled-cadence design (see ONE_MINUTE_SETTLEMENT.md). Additive
-// on top of the base lifecycle: with the checkpoint cadence disabled (the default), the scheme is a plain
-// channel. x402: distinct client signer per customer, so each checkpoint packs [Ed25519, settle] pairs,
-// size-bound at n ≤ 5 in a 1,232-byte tx (~16 under a 4kB tx). mpp: one operator holds authorizedSigner
-// across the fleet, so ADR-004 batches DISTINCT customers into one signed commitment, account-bound at
-// n ≤ 59. Per-channel fits from MODES_MPP_X402.md (toly, 2026-08-06).
-const X402_CHECKPOINT_TODAY_MAX_BATCH = 5; // 1,232-byte tx limit today
-const X402_CHECKPOINT_MAX_BATCH = 16; // under 4kB transactions (SIMD-0296 / 0385)
-const X402_CHECKPOINT_DEFAULT_BATCH = 5;
-const MPP_CHECKPOINT_MAX_BATCH = 59; // 64-account tx cap, ADR-004
-const MPP_CHECKPOINT_LARGETX_MAX_BATCH = 60; // ADR-004 59 → 60 under 4kB transactions
-const MPP_CHECKPOINT_DEFAULT_BATCH = 59;
-const USER_STEPS = [0, 1, 10, 100, 1_000, 10_000, 100_000, 1_000_000, 10_000_000, 100_000_000] as const;
-const SETTLEMENT_CLOCK_OPTIONS = [
-    { label: 'Disabled', value: 0 },
-    { label: '1s', value: 1 },
-    { label: '2s', value: 2 },
-    { label: '3s', value: 3 },
-    { label: '4s', value: 4 },
-    { label: '5s', value: 5 },
-    { label: '10s', value: 10 },
-    { label: '15s', value: 15 },
-    { label: '30s', value: 30 },
-    { label: '1m', value: 60 },
-    { label: '2m', value: 120 },
-    { label: '5m', value: 300 },
-    { label: '10m', value: 600 },
-    { label: '30m', value: 1_800 },
-    { label: '1h', value: 3_600 },
-    { label: '2h', value: 7_200 },
-    { label: '3h', value: 10_800 },
-    { label: '6h', value: 21_600 },
-    { label: '12h', value: 43_200 },
-    { label: '24h', value: 86_400 },
-] as const;
-
-const CHANNEL_LIFETIME_OPTIONS = [
-    { label: '5m', value: 300 },
-    { label: '10m', value: 600 },
-    { label: '30m', value: 1_800 },
-    { label: '1h', value: 3_600 },
-    { label: '12h', value: 43_200 },
-    { label: '1d', value: 86_400 },
-    { label: '2d', value: 172_800 },
-    { label: '1w', value: 604_800 },
-] as const;
-
-const DEFAULT_DEMAND: DemandInputs = {
-    averageRequestsPerMinutePerUser: 60,
-    averageTransactionValueUsd: 0.05,
-    capitalCostAnnualPercent: 8,
-    channelLifetimeSeconds: 86_400,
-    priorityFeeLamportsPerTx: 0,
-    settlementClockSeconds: 60,
-    solPriceUsd: 80,
-    users: 10_000_000,
-    // ~$0.02 / million verified vouchers. Placeholder for a full hot-path verify handler + HA on cloud
-    // vCPU; the honest band spans ~$0.002 (bare batch Ed25519 verify) to ~$0.05 (fat handler + headroom).
-    voucherVerifyCostUsdPerMillion: 0.02,
-};
-
-const TODAY: ModelInputs = {
-    availableCapacityPercent: 50,
-    blockCostUnits: 100_000_000,
-    checkpointBatchSize: X402_CHECKPOINT_DEFAULT_BATCH,
-    // Checkpoints default OFF: selecting a scheme should not silently spend the whole CU budget on interim
-    // enforceability settles (at 10M channels/60s that alone exceeds the block budget). Opt in via the knob.
-    checkpointClockSeconds: 0,
-    largeTx: false,
-    mode: 'channel-v1',
-    openCostUnits: V2_OPEN_COST_UNITS,
-    reclaimBatchSize: 8,
-    rentPerChannelSol: 0.00471192,
-    scheme: 'none',
-    slotMs: 400,
-    transferCostUnits: SPL_TOKEN_TRANSFER_COST_UNITS,
-    transferKind: 'spl-token',
-    voucherSigFeeRemoved: false,
-    voucherVerifyPerSecond: 1_000_000,
-};
-
-// Timeline as non-exclusive, stackable SIMDs. Each toggle applies its own delta to the SIMD-controlled
-// subset of ModelInputs, so multiple upgrades compose. Deltas track SIMD_WATCH.md (toly, 2026-08-06).
-// Applied in array order — rent ÷2 before rent ÷10 (÷10 supersedes), p-ATA before Alpenglow (bumps stack).
-type SimdParams = Pick<
-    ModelInputs,
-    | 'availableCapacityPercent'
-    | 'blockCostUnits'
-    | 'slotMs'
-    | 'rentPerChannelSol'
-    | 'openCostUnits'
-    | 'voucherSigFeeRemoved'
-    | 'largeTx'
->;
-const BASELINE_RENT_SOL = 0.00471192;
-const BASELINE_SIMD_PARAMS: SimdParams = {
-    availableCapacityPercent: 50,
-    blockCostUnits: 100_000_000,
-    largeTx: false,
-    openCostUnits: V2_OPEN_COST_UNITS,
-    rentPerChannelSol: BASELINE_RENT_SOL,
-    slotMs: 400,
-    voucherSigFeeRemoved: false,
-};
-
-interface Simd {
-    readonly id: string;
-    readonly code: string;
-    readonly href: string;
-    readonly label: string;
-    readonly status: string;
-    readonly note: string;
-    readonly warn?: boolean;
-    readonly apply?: (params: SimdParams) => SimdParams;
-}
-
-const SIMDS: readonly Simd[] = [
-    {
-        code: 'SIMD-0266',
-        href: 'https://github.com/solana-program/token/tree/main/p-token',
-        id: 'p-token',
-        label: 'p-token',
-        note: 'Shipped precedent: proposal to mainnet in ~13 months.',
-        status: 'Shipped',
-    },
-    {
-        apply: params => ({
-            ...params,
-            availableCapacityPercent: Math.min(100, params.availableCapacityPercent * 1.1),
-            openCostUnits: 17_300,
-        }),
-        code: 'SIMD-0567',
-        href: 'https://github.com/solana-foundation/solana-improvement-documents/pull/567',
-        id: 'p-ata',
-        label: 'p-ATA',
-        note: 'ATA Create 22.9k → 4.2k CU; channel open cost drops ~52%.',
-        status: 'Review',
-    },
-    {
-        apply: params => ({ ...params, voucherSigFeeRemoved: true }),
-        code: 'SIMD-0568',
-        href: 'https://github.com/solana-foundation/solana-improvement-documents/pull/568',
-        id: 'precompile',
-        label: 'Precompile removal',
-        note: 'Cuts voucher fee 10k → 5k lamports; requires migration.',
-        status: 'Review',
-        warn: true,
-    },
-    {
-        apply: params => ({ ...params, largeTx: true }),
-        code: 'SIMD-0296 / 0385',
-        href: 'https://github.com/solana-foundation/solana-improvement-documents/blob/main/proposals/0296-larger-transactions.md',
-        id: 'large-tx',
-        label: '4kB transactions',
-        note: 'Lets x402 pack 5 → 16 settles per checkpoint.',
-        status: 'Review',
-    },
-];
-
-// Scenario presets. A pill selection resolves to a full, VERIFIED-to-fit configuration (demand +
-// settlement stack + active SIMDs) so every preset demonstrates a successful shape (0 dropped). Three
-// axes: Scale (exclusive) and Horizon (exclusive) plus two combinable Optimize toggles.
-//
-// The rail is HORIZON-dependent, because v2 is not available today:
-//   • Available today → payment channel v1 (ephemeral) + x402 client-signed vouchers, no SIMDs. The x402
-//     and MPP *modes* both assume the ADR-005 v2 persistent-channel lifecycle (see MODES_MPP_X402.md), so
-//     what actually ships today is v1 with client-signed vouchers. The off-chain Ed25519 verify plane binds
-//     here, so the today presets also scale the verify fleet to the demand (a horizontally-scalable knob,
-//     not a protocol limit). Consequence: 10M/today needs a long (~2h) cash-sweep window and its fastest
-//     enforceable finality is ~30m (per-customer x402 checkpoints are expensive).
-//   • Long-term → payment channel v2 (ADR-005 re-arm) + MPP operator-signed + the timeline SIMDs. MPP
-//     removes the per-payment Ed25519 ceiling and its ADR-004 batching gives the cheapest checkpoints, so
-//     the same 10M scale reaches ~5m finality at a fraction of today's cost.
-//
-// The resolved (cash-sweep window, checkpoint cadence) values below were found by sweeping the model for
-// the objective of each toggle combination (web/sweep.mjs mirrors the model math exactly):
-//   • Cheapest OFF → shortest fitting cash-sweep window (fast base-layer finality, more txs/fees).
-//   • Cheapest ON  → opex-minimizing window — the U-shaped optimum (fees dominate short windows, escrow
-//     float dominates long ones), i.e. "play with the clock" to get genuinely cheaper.
-//   • Fastest  ON  → layer enforceability checkpoints at the fastest cadence the remaining budget allows.
-// Channel lifetime is always the 1-week max (K amortization is free on v2 — it only lowers cost; on v1 it
-// is inert since each session tears the channel down).
-type PresetScale = '1M' | '10M';
-type PresetHorizon = 'today' | 'longterm';
-interface PresetSelection {
-    readonly cheapest: boolean;
-    readonly fastest: boolean;
-    readonly horizon: PresetHorizon;
-    readonly scale: PresetScale;
-}
-const PRESET_SIMD_IDS: readonly string[] = ['p-ata', 'precompile', 'large-tx'];
-const PRESET_LIFETIME_SECONDS = 604_800; // 1 week — max amortization, always opex-optimal (v2 only)
-const PRESET_USERS: Readonly<Record<PresetScale, number>> = { '10M': 10_000_000, '1M': 1_000_000 };
-const PRESET_VERIFY_MAX = 20_000_000; // knob ceiling; today's x402 presets scale the verify fleet to demand
-// The available-today rail is v1 + x402 (client-signed); long-term is v2 + MPP (operator-signed).
-const PRESET_RAIL: Readonly<
-    Record<PresetHorizon, { mode: ModelMode; scheme: SettlementScheme; checkpointBatch: number }>
-> = {
-    longterm: { checkpointBatch: MPP_CHECKPOINT_DEFAULT_BATCH, mode: 'channel-v2', scheme: 'mpp' },
-    today: { checkpointBatch: X402_CHECKPOINT_DEFAULT_BATCH, mode: 'channel-v1', scheme: 'x402' },
-};
-// key = `${scale}|${horizon}|${cheapest ? 1 : 0}${fastest ? 1 : 0}` → resolved (window, checkpoint) seconds.
-const PRESET_SHAPES: Readonly<Record<string, { checkpoint: number; clock: number }>> = {
-    '10M|longterm|00': { checkpoint: 0, clock: 3_600 },
-    '10M|longterm|01': { checkpoint: 300, clock: 3_600 },
-    '10M|longterm|10': { checkpoint: 0, clock: 3_600 },
-    '10M|longterm|11': { checkpoint: 300, clock: 3_600 },
-    '10M|today|00': { checkpoint: 0, clock: 7_200 },
-    '10M|today|01': { checkpoint: 1_800, clock: 7_200 },
-    '10M|today|10': { checkpoint: 0, clock: 7_200 },
-    '10M|today|11': { checkpoint: 1_800, clock: 7_200 },
-    '1M|longterm|00': { checkpoint: 0, clock: 300 },
-    '1M|longterm|01': { checkpoint: 30, clock: 300 },
-    '1M|longterm|10': { checkpoint: 0, clock: 1_800 },
-    '1M|longterm|11': { checkpoint: 10, clock: 1_800 },
-    '1M|today|00': { checkpoint: 0, clock: 600 },
-    '1M|today|01': { checkpoint: 300, clock: 600 },
-    '1M|today|10': { checkpoint: 0, clock: 3_600 },
-    '1M|today|11': { checkpoint: 60, clock: 3_600 },
-};
-function presetKey(sel: PresetSelection): string {
-    return `${sel.scale}|${sel.horizon}|${sel.cheapest ? 1 : 0}${sel.fastest ? 1 : 0}`;
-}
-
 const MODE_LABELS: Readonly<Record<ModelMode, string>> = {
     'channel-v1': 'Payment channel v1',
     'channel-v2': 'Payment channel v2',
@@ -354,7 +86,7 @@ function settlementLabel(mode: ModelMode, scheme: SettlementScheme): string {
 
 const BASE_METHODS: readonly { id: BaseMethod; label: string; sub: string }[] = [
     { id: 'vanilla', label: 'Vanilla transfer', sub: 'one on-chain tx / payment' },
-    { id: 'v1', label: 'Payment channel v1', sub: 'Ephemeral channels' },
+    { id: 'v1', label: 'Payment channel v1', sub: 'Deployed · persistent OPEN channels' },
     { id: 'v2', label: 'Payment channel v2', sub: '• Recyclable channels\n• Operated voucher compaction' },
 ];
 function baseMethodOf(mode: ModelMode): BaseMethod {
@@ -363,19 +95,9 @@ function baseMethodOf(mode: ModelMode): BaseMethod {
     return 'v2';
 }
 
-// Channel persistence is a property of the BASE: v2 keeps the channel open across sessions (ADR-005 re-arm),
-// v1 tears down and rebuilds each session. A settlement scheme (x402/mpp) does not change this.
-function isPersistentChannel(mode: ModelMode): boolean {
+function usesRearm(mode: ModelMode): boolean {
     return mode === 'channel-v2';
 }
-// Per-payment Ed25519 voucher verification (the off-chain fleet) is needed for a plain channel or the
-// client-signed x402 scheme. MPP operator-signed (mpp-specs #309) inverts it: the operator holds
-// authorizedSigner and signs cumulative vouchers itself while the client uses a reusable bearer proof, so
-// there is no per-payment client signature to verify. Vanilla carries no vouchers at all.
-function requiresPerPaymentVerify(mode: ModelMode, scheme: SettlementScheme): boolean {
-    return mode !== 'vanilla' && scheme !== 'mpp';
-}
-
 function formatCompact(value: number, decimals = 1): string {
     return new Intl.NumberFormat('en-US', {
         maximumFractionDigits: decimals,
@@ -516,153 +238,20 @@ function SelectKnob({ disabled = false, help, label, onChange, options, value }:
     );
 }
 
-function reclaimCostPerChannel(batchSize: number): number {
-    return 617 + 1_044 / batchSize;
-}
-
-/** A settlement scheme (x402 / mpp) supports enforceability checkpoints; a plain channel does not. */
-function schemeHasCheckpoints(scheme: SettlementScheme): boolean {
-    return scheme !== 'none';
-}
-
-/**
- * Largest number of channel-settles that pack into one checkpoint tx for the given scheme. x402 is
- * size-bound (5 today, 16 under 4kB txs); mpp is account-bound via ADR-004 (59, 60 under 4kB). `largeTx`
- * reflects SIMD-0296 / 0385 being active on the timeline.
- */
-function checkpointMaxBatch(scheme: SettlementScheme, largeTx: boolean): number {
-    if (scheme === 'mpp') return largeTx ? MPP_CHECKPOINT_LARGETX_MAX_BATCH : MPP_CHECKPOINT_MAX_BATCH;
-    return largeTx ? X402_CHECKPOINT_MAX_BATCH : X402_CHECKPOINT_TODAY_MAX_BATCH;
-}
-
-/**
- * Scheduler cost of one enforceability checkpoint, per channel, at batch size `n`.
- * x402 packs [Ed25519, settle] pairs (client signer per customer); mpp batches distinct customers under one
- * operator signer via ADR-004. Fits from MODES_MPP_X402.md. No scheme (plain channel): 0.
- */
-function checkpointCostPerChannel(scheme: SettlementScheme, batchSize: number): number {
-    const n = Math.max(1, batchSize);
-    if (scheme === 'x402') return 3_166 + 1_043 / n;
-    if (scheme === 'mpp') return 890 + 3_420 / n;
-    return 0;
-}
-
-/** Scheduler cost of one settlement boundary (one session). `sessionsPerChannel` (K) only matters for v2. */
-function lifecycleCost(inputs: ModelInputs, sessionsPerChannel: number): number {
-    const reclaim = reclaimCostPerChannel(inputs.reclaimBatchSize);
-    if (inputs.mode === 'channel-v1') {
-        // Full teardown/rebuild every session: open + settle_and_seal+distribute + (batched) reclaim.
-        // `open` is factored out so a timeline SIMD (p-ATA) can move it independently of the rest.
-        return V1_LIFECYCLE_EX_OPEN_COST_UNITS + inputs.openCostUnits - STANDALONE_RECLAIM_COST_UNITS + reclaim;
-    }
-
-    // ADR-005: over K = sessionsPerChannel sessions the channel pays one open, (K−1) cheap rearm+top_up
-    // boundaries, one terminal close carrying the final voucher, and one batched reclaim:
-    //   [open + (K−1)·boundary + close + reclaim] / K  =  boundary + (open + close + reclaim − boundary)/K
-    // At K=1 this equals v1 exactly (the terminal close replaces the only boundary; zero re-arms occur);
-    // for K>1 it is strictly cheaper. Reclaim stays batch-dependent so the K=1 == v1 invariant holds for
-    // every reclaim-batch value, not just the observed 8.
-    const channelOnceOffOverhead =
-        inputs.openCostUnits + V2_TERMINAL_CLOSE_COST_UNITS + reclaim - SESSION_BOUNDARY_V2_COST_UNITS;
-    return SESSION_BOUNDARY_V2_COST_UNITS + channelOnceOffOverhead / Math.max(1, sessionsPerChannel);
-}
-
-type ArrivingDemandKey = 'averageRequestsPerMinutePerUser' | 'users';
-
-function arrivingRequestsPerSecond(demand: DemandInputs): number {
-    return (demand.users * demand.averageRequestsPerMinutePerUser) / 60;
-}
-
-function clampArrivingDemand(previous: DemandInputs, key: ArrivingDemandKey, proposedValue: number): DemandInputs {
-    const currentValue = previous[key];
-    const candidate = { ...previous, [key]: proposedValue };
-    const candidateRate = arrivingRequestsPerSecond(candidate);
-
-    // Decreases are always allowed, including recovery from state created before this clamp existed.
-    if (proposedValue <= currentValue || candidateRate <= TARGET_PAYMENTS_PER_SECOND) return candidate;
-
-    if (key === 'users') {
-        if (previous.averageRequestsPerMinutePerUser === 0) return candidate;
-
-        const maximumUsers = Math.floor((TARGET_PAYMENTS_PER_SECOND * 60) / previous.averageRequestsPerMinutePerUser);
-        const users = USER_STEPS.reduce(
-            (closest, option) => (option <= Math.min(proposedValue, maximumUsers) ? option : closest),
-            USER_STEPS[0],
-        );
-        return { ...previous, users };
-    }
-
-    if (previous.users === 0) return candidate;
-
-    const maximumRequestsPerMinute = Math.floor((TARGET_PAYMENTS_PER_SECOND * 60) / previous.users);
-    return {
-        ...previous,
-        averageRequestsPerMinutePerUser: Math.min(proposedValue, maximumRequestsPerMinute),
-    };
-}
-
 /** Interactive capacity model backed by the report's measured scheduler costs. */
-const QUERY_TO_MODE: Readonly<Record<string, ModelMode>> = {
-    v1: 'channel-v1',
-    v2: 'channel-v2',
-    vanilla: 'vanilla',
-};
 const MODE_TO_QUERY: Readonly<Record<ModelMode, string>> = {
     'channel-v1': 'v1',
     'channel-v2': 'v2',
     vanilla: 'vanilla',
 };
-const QUERY_TO_SCHEME: Readonly<Record<string, SettlementScheme>> = { mpp: 'mpp', x402: 'x402' };
-
-/** Snap an arbitrary user count to the nearest discrete slider step. */
-function nearestUserStep(value: number): number {
-    return USER_STEPS.reduce(
-        (best, step) => (Math.abs(step - value) < Math.abs(best - value) ? step : best),
-        USER_STEPS[0],
-    );
-}
-
-/** Seed demand + settlement method from the shareable `?users&rpm&clock&method&scheme` query. */
-function readSharedParams(): { demand: Partial<DemandInputs>; mode?: ModelMode; scheme?: SettlementScheme } {
-    const demand: Partial<DemandInputs> = {};
-    if (typeof window === 'undefined') return { demand };
-    const params = new URLSearchParams(window.location.search);
-
-    const users = Number(params.get('users'));
-    if (params.has('users') && Number.isFinite(users)) demand.users = nearestUserStep(Math.max(0, users));
-
-    const rpm = Number(params.get('rpm'));
-    if (params.has('rpm') && Number.isFinite(rpm)) {
-        demand.averageRequestsPerMinutePerUser = Math.min(500, Math.max(0, Math.round(rpm)));
-    }
-
-    const clock = Number(params.get('clock'));
-    if (params.has('clock') && SETTLEMENT_CLOCK_OPTIONS.some(option => option.value === clock)) {
-        demand.settlementClockSeconds = clock;
-    }
-
-    return {
-        demand,
-        mode: QUERY_TO_MODE[params.get('method') ?? ''],
-        scheme: QUERY_TO_SCHEME[params.get('scheme') ?? ''],
-    };
-}
 
 export function App() {
-    const [inputs, setInputs] = useState<ModelInputs>(() => {
-        const { mode, scheme } = readSharedParams();
-        return {
-            ...TODAY,
-            ...(mode ? { mode } : {}),
-            // A scheme only applies to a channel base; ignore it under vanilla.
-            ...(scheme && (mode ?? TODAY.mode) !== 'vanilla' ? { scheme } : {}),
-        };
-    });
-    const [demand, setDemand] = useState<DemandInputs>(() => ({ ...DEFAULT_DEMAND, ...readSharedParams().demand }));
-    const [activeSimds, setActiveSimds] = useState<readonly string[]>([]);
-    // Which scenario preset (if any) the current state was loaded from. Cleared to null on any manual edit,
-    // so the pills reflect "this is exactly the preset" vs "customized from here".
-    const [preset, setPreset] = useState<PresetSelection | null>(null);
+    const [state, dispatch] = useReducer(
+        appReducer,
+        typeof window === 'undefined' ? '' : window.location.search,
+        createInitialState,
+    );
+    const { activeSimds, demand, inputs, preset } = state;
 
     // Mirror the four shareable knobs into the URL query so any configuration is linkable.
     // Debounced + guarded: dragging a range slider fires an `input` event per pixel, so a single
@@ -694,326 +283,95 @@ export function App() {
         return () => window.clearTimeout(handle);
     }, [demand, inputs.mode, inputs.scheme]);
 
-    const blocksPerSecond = 1_000 / inputs.slotMs;
-    const nominalBudgetPerSecond = inputs.blockCostUnits * blocksPerSecond;
-    const availableBudgetPerSecond = nominalBudgetPerSecond * (inputs.availableCapacityPercent / 100);
     const isChannel = inputs.mode !== 'vanilla';
-    const logicalRequestsPerSecond = arrivingRequestsPerSecond(demand);
-    const settlementClockEnabled = demand.settlementClockSeconds > 0;
-    // Offer only lifetimes ≥ the active settlement clock — a channel can't be shorter than one session.
+    const perPaymentVerify = requiresPerPaymentVerify(inputs.mode, inputs.scheme);
+    const {
+        allInTakeRateBps,
+        availableBudgetPerSecond,
+        bindingConstraint,
+        blocksPerSecond,
+        budgetSharePercent,
+        canHandleDemand,
+        capitalCarryingCostUsdPerYear,
+        channelBuildsPerSecond,
+        channelLifeSeconds,
+        checkpointBudgetSharePercent,
+        checkpointCostPerChannelUnits,
+        checkpointCostUnitsPerSecond,
+        checkpointTransactionsPerSecond,
+        checkpointsEnabled,
+        checkpointsPerSecond,
+        costPerLifecycle,
+        costPerLogicalPayment,
+        droppedRequestsPerSecond,
+        escrowFloatUsd,
+        feeTakeRateBps,
+        feeUsdPerYear,
+        grossValuePerSecondUsd,
+        hasCheckpointScheme,
+        liveChannels,
+        logicalRequestsPerSecond,
+        maximumPaymentsPerSecond,
+        networkFeeMultiplier,
+        networkFeeSavingsUsdPerDay,
+        networkFeeUsdPerSecond,
+        nominalBudgetPerSecond,
+        onChainBacklogFactor,
+        onChainTxPerWindow,
+        paymentsPerChannel,
+        physicalTransactionsPerSecond,
+        processedPercent,
+        processedRequestsPerSecond,
+        progressPercent,
+        rentWorkingCapital,
+        rentWorkingCapitalUsd,
+        requiredBudgetPerSecond,
+        requestsPerSettlement,
+        sessionsPerChannel,
+        settlementClockEnabled,
+        settlementLatencySeconds,
+        settlementWindowSeconds,
+        settlementsPerSecond,
+        sustainableCeiling,
+        totalOpexUsdPerYear,
+        vanillaFeeTakeRateBps,
+        vanillaNetworkFeeUsdPerSecond,
+        voucherVerifiesPerSecond,
+        voucherVerifyCeiling,
+        voucherVerifySharePercent,
+        verifyComputeUsdPerSecond,
+        verifyComputeUsdPerYear,
+        windowDrainSeconds,
+        workingCapitalUsd,
+    } = evaluateModel(inputs, demand);
+    const effectiveCheckpointBatch = effectiveCheckpointBatchSize(inputs);
+    const checkpointBatchMaximum = inputs.batchSettlementAvailable
+        ? checkpointMaxBatch(inputs.scheme, inputs.largeTx, inputs.voucherSigFeeRemoved)
+        : 1;
+    const cashBoundaryCostUnits =
+        inputs.mode === 'channel-v1'
+            ? SETTLE_COST_UNITS + INTERIM_DISTRIBUTE_COST_UNITS + TOP_UP_COST_UNITS
+            : SESSION_BOUNDARY_V2_COST_UNITS;
     const channelLifetimeOptions = settlementClockEnabled
         ? CHANNEL_LIFETIME_OPTIONS.filter(option => option.value >= demand.settlementClockSeconds)
         : CHANNEL_LIFETIME_OPTIONS;
-    // One channel = one session. It accumulates cumulative vouchers off-chain, then makes exactly ONE
-    // on-chain settle_and_seal + distribute when the session idle-closes — this is how MPP `session` and
-    // x402 `upto` actually settle (see the program lifecycle). So payments-per-channel is DERIVED from the
-    // session window and the request rate; it is not a free knob, and it is ultimately capped by the escrow
-    // deposit divided by the payment value.
-    const requestsPerSettlement = isChannel
-        ? settlementClockEnabled
-            ? Math.max(1, (demand.averageRequestsPerMinutePerUser * demand.settlementClockSeconds) / 60)
-            : 1
-        : 1;
-    const paymentsPerChannel = requestsPerSettlement;
 
-    // Session length = how long a channel accumulates vouchers before its settlement boundary.
-    const channelLifeSeconds = settlementClockEnabled
-        ? demand.settlementClockSeconds
-        : demand.averageRequestsPerMinutePerUser > 0
-          ? 60 / demand.averageRequestsPerMinutePerUser
-          : Infinity;
-    // K = sessions per channel. v1 tears down each session (K=1 effectively); ADR-005 v2 keeps the channel
-    // alive across the whole lifetime, so its build/teardown amortizes over lifetime ÷ session clock.
-    const sessionsPerChannel = settlementClockEnabled
-        ? Math.max(1, demand.channelLifetimeSeconds / demand.settlementClockSeconds)
-        : 1;
-
-    // Enforceability checkpoints (x402 / mpp schemes only). A separate, typically FASTER cadence than the
-    // cash-sweep clock above: each live channel posts one interim settle per checkpoint window to make its
-    // accumulated voucher value claimable early. Additive on-chain cost on top of the base lifecycle; with
-    // the cadence disabled (the default) it contributes nothing and the scheme is a plain channel. mpp
-    // batches distinct customers under one operator signer (ADR-004, ~948 CU/ch); x402 packs per-customer
-    // [Ed25519, settle] pairs (~3,375 CU/ch at n=5) — so mpp is strictly cheaper here at equal demand.
-    const hasCheckpointScheme = isChannel && schemeHasCheckpoints(inputs.scheme);
-    const checkpointsEnabled = hasCheckpointScheme && inputs.checkpointClockSeconds > 0;
-    const checkpointChannels = isChannel ? demand.users : 0;
-    const checkpointCostPerChannelUnits = checkpointsEnabled
-        ? checkpointCostPerChannel(inputs.scheme, inputs.checkpointBatchSize)
-        : 0;
-    const checkpointsPerSecond = checkpointsEnabled ? checkpointChannels / inputs.checkpointClockSeconds : 0;
-    const checkpointCostUnitsPerSecond = checkpointsPerSecond * checkpointCostPerChannelUnits;
-    // n channel-settles pack into one physical checkpoint tx.
-    const checkpointTransactionsPerSecond = checkpointsEnabled
-        ? checkpointsPerSecond / Math.max(1, inputs.checkpointBatchSize)
-        : 0;
-
-    // Cost of one settlement boundary (one session), then amortized over the payments that session carried.
-    const costPerLifecycle = isChannel ? lifecycleCost(inputs, sessionsPerChannel) : inputs.transferCostUnits;
-    const costPerLogicalPayment = isChannel ? costPerLifecycle / paymentsPerChannel : inputs.transferCostUnits;
-
-    // Checkpoints claim a fixed slice of the scheduler budget (they scale with live channels + cadence, not
-    // with the payment lifecycle), so payment throughput is bounded by what's LEFT after checkpoints.
-    const budgetForPaymentsPerSecond = Math.max(0, availableBudgetPerSecond - checkpointCostUnitsPerSecond);
-    const maximumPaymentsPerSecond = costPerLogicalPayment > 0 ? budgetForPaymentsPerSecond / costPerLogicalPayment : 0;
-    // Off-chain voucher plane: every logical payment is a voucher the session service must Ed25519-verify.
-    // Vanilla transfers carry no vouchers, so only the on-chain ceiling applies there.
-    const perPaymentVerify = requiresPerPaymentVerify(inputs.mode, inputs.scheme);
-    const voucherVerifyCeiling = perPaymentVerify ? inputs.voucherVerifyPerSecond : Infinity;
-    // A path sustains only as fast as its tightest stage: on-chain execution or off-chain verification.
-    const sustainableCeiling = Math.min(maximumPaymentsPerSecond, voucherVerifyCeiling);
-    const progressPercent = Math.min(100, (logicalRequestsPerSecond / TARGET_PAYMENTS_PER_SECOND) * 100);
-    // Requests the selected path can actually sustain: demand capped by the tightest ceiling.
-    const processedRequestsPerSecond = Math.min(logicalRequestsPerSecond, sustainableCeiling);
-    const processedPercent = Math.min(100, (processedRequestsPerSecond / TARGET_PAYMENTS_PER_SECOND) * 100);
-    const droppedRequestsPerSecond = Math.max(0, logicalRequestsPerSecond - processedRequestsPerSecond);
-    const voucherVerifyBinds = perPaymentVerify && voucherVerifyCeiling < maximumPaymentsPerSecond;
-    const bindingConstraint =
-        droppedRequestsPerSecond <= 0
-            ? 'none'
-            : voucherVerifyBinds
-              ? 'off-chain Ed25519 voucher verification'
-              : 'on-chain execution budget';
-    const requiredBudgetPerSecond = logicalRequestsPerSecond * costPerLogicalPayment + checkpointCostUnitsPerSecond;
-    const budgetSharePercent =
-        availableBudgetPerSecond > 0 ? (requiredBudgetPerSecond / availableBudgetPerSecond) * 100 : 0;
-    const checkpointBudgetSharePercent =
-        availableBudgetPerSecond > 0 ? (checkpointCostUnitsPerSecond / availableBudgetPerSecond) * 100 : 0;
-    const voucherVerifySharePercent = (logicalRequestsPerSecond / voucherVerifyCeiling) * 100;
-
-    // One settlement boundary per session (a settle_and_seal close in v1, a rearm in v2).
-    const sessionsPerSecond = isChannel ? logicalRequestsPerSecond / paymentsPerChannel : 0;
-    const channelLifecyclesPerSecond = sessionsPerSecond;
-    const settlementsPerSecond = sessionsPerSecond;
-    // Channel builds+teardowns per second: every session in v1; once per K sessions with ADR-005 re-arm.
-    const channelBuildsPerSecond = isPersistentChannel(inputs.mode)
-        ? sessionsPerSecond / sessionsPerChannel
-        : sessionsPerSecond;
-    const physicalTransactionsPerSecond =
-        (!isChannel
-            ? logicalRequestsPerSecond
-            : inputs.mode === 'channel-v1'
-              ? sessionsPerSecond + // open
-                sessionsPerSecond + // terminal settle_and_seal + distribute
-                sessionsPerSecond / inputs.reclaimBatchSize // batched reclaim
-              : sessionsPerSecond * 2 + // rearm + top_up per session
-                channelBuildsPerSecond * (2 + 1 / inputs.reclaimBatchSize)) + // amortized open + close + batched reclaim
-        checkpointTransactionsPerSecond; // interim enforceability settles (checkpoint modes only; else 0)
-    const liveChannels = isChannel ? demand.users : 0;
-    const rentWorkingCapital = liveChannels * inputs.rentPerChannelSol;
-    const grossValuePerSecondUsd = logicalRequestsPerSecond * demand.averageTransactionValueUsd;
-    const canHandleDemand = logicalRequestsPerSecond <= sustainableCeiling;
-
-    // Settlement reckoning: rates hide the absolute on-chain work and the time to clear it.
-    // Backlog factor >1 means the chain cannot keep up with the OFFERED demand and the queue grows.
-    const onChainBacklogFactor =
-        availableBudgetPerSecond > 0 ? requiredBudgetPerSecond / availableBudgetPerSecond : Infinity;
-    // Enforceable finality: without checkpoints a payment is claimable on-chain only when its session closes
-    // (one cash-sweep window). Enforceability checkpoints post an interim settle on a faster cadence, so the
-    // accrued value becomes claimable within the checkpoint window instead — that (not the long cash-sweep
-    // window) is the real time-to-finality when checkpoints run.
-    const enforceableFinalitySeconds = checkpointsEnabled
-        ? Math.min(inputs.checkpointClockSeconds, Number.isFinite(channelLifeSeconds) ? channelLifeSeconds : Infinity)
-        : channelLifeSeconds;
-    // A payment cannot settle before its enforceable-finality window, then must wait out the on-chain drain if over budget.
-    const settlementLatencySeconds = isChannel
-        ? (Number.isFinite(enforceableFinalitySeconds) ? enforceableFinalitySeconds : 0) *
-          Math.max(1, onChainBacklogFactor)
-        : Math.max(1, onChainBacklogFactor) / Math.max(blocksPerSecond, 0.001);
-    // On-chain transactions generated over one settlement window, and chain-time to land them.
-    const settlementWindowSeconds = isChannel && Number.isFinite(channelLifeSeconds) ? channelLifeSeconds : 1;
-    const onChainTxPerWindow = physicalTransactionsPerSecond * settlementWindowSeconds;
-    const windowDrainSeconds = settlementWindowSeconds * onChainBacklogFactor;
-
-    // Operating cost: the dollar cost of running the rail at the selected demand. None of this touches
-    // the CU capacity math above — it converts the physical on-chain footprint into fees + tied-up capital.
-    // Most channel transactions (open/settle/rearm/top_up) carry two signatures (payee + fee payer); vanilla
-    // transfers carry one. Base fee is the fixed 5,000 lamports/signature; priority fee is a per-tx knob
-    // (0 by default — realistic while blocks sit ~⅓ full, add it to model congestion pricing).
-    // Channel txs carry payee + fee-payer signatures (2); voucher-bearing settles also pay an ed25519
-    // precompile signature fee. SIMD-0568 removes that precompile, so a settle drops to a single base sig.
-    const signaturesPerTransaction = isChannel ? (inputs.voucherSigFeeRemoved ? 1 : 2) : 1;
-    const networkFeeLamportsPerSecond =
-        physicalTransactionsPerSecond *
-        (signaturesPerTransaction * BASE_FEE_LAMPORTS_PER_SIGNATURE + demand.priorityFeeLamportsPerTx);
-    const networkFeeSolPerSecond = networkFeeLamportsPerSecond / LAMPORTS_PER_SOL;
-    const networkFeeUsdPerSecond = networkFeeSolPerSecond * demand.solPriceUsd;
-    const feeTakeRateBps = grossValuePerSecondUsd > 0 ? (networkFeeUsdPerSecond / grossValuePerSecondUsd) * 10_000 : 0;
-    const vanillaNetworkFeeUsdPerSecond =
-        ((logicalRequestsPerSecond * (BASE_FEE_LAMPORTS_PER_SIGNATURE + demand.priorityFeeLamportsPerTx)) /
-            LAMPORTS_PER_SOL) *
-        demand.solPriceUsd;
-    const vanillaFeeTakeRateBps =
-        grossValuePerSecondUsd > 0 ? (vanillaNetworkFeeUsdPerSecond / grossValuePerSecondUsd) * 10_000 : 0;
-    const networkFeeMultiplier =
-        networkFeeUsdPerSecond > 0 ? vanillaNetworkFeeUsdPerSecond / networkFeeUsdPerSecond : Infinity;
-    const networkFeeSavingsUsdPerDay = Math.max(
-        0,
-        (vanillaNetworkFeeUsdPerSecond - networkFeeUsdPerSecond) * SECONDS_PER_DAY,
-    );
-
-    // Working capital tied up (refundable, not burned): channel + escrow rent, plus the escrow float —
-    // value accumulated within one settlement window before it settles on-chain and the deposit refreshes.
-    const rentWorkingCapitalUsd = rentWorkingCapital * demand.solPriceUsd;
-    const escrowFloatUsd = isChannel ? grossValuePerSecondUsd * settlementWindowSeconds : 0;
-    const workingCapitalUsd = rentWorkingCapitalUsd + escrowFloatUsd;
-    const capitalCarryingCostUsdPerYear = workingCapitalUsd * (demand.capitalCostAnnualPercent / 100);
-
-    // Off-chain verify fleet: a placeholder compute penalty the client-signed planes pay OFF-chain, one
-    // Ed25519 voucher verification per accepted payment (plain channel + x402). MPP operator-signed and
-    // vanilla have no per-payment client signature, so this whole plane is $0 for them — that asymmetry is
-    // exactly what makes MPP cheaper at equal on-chain shape. Sized on processed (accepted) payments, since
-    // dropped requests are never verified. Priced from the $/million dial (no benchmark yet).
-    const voucherVerifiesPerSecond = perPaymentVerify ? processedRequestsPerSecond : 0;
-    const verifyComputeUsdPerSecond = (voucherVerifiesPerSecond / 1_000_000) * demand.voucherVerifyCostUsdPerMillion;
-    const verifyComputeUsdPerYear = verifyComputeUsdPerSecond * SECONDS_PER_YEAR;
-
-    // All-in operating cost: fees (a burn) + the off-chain verify fleet (a burn) + the carrying cost of the
-    // refundable capital held in the rail.
-    const feeUsdPerYear = networkFeeUsdPerSecond * SECONDS_PER_YEAR;
-    const totalOpexUsdPerYear = feeUsdPerYear + verifyComputeUsdPerYear + capitalCarryingCostUsdPerYear;
-    const allInTakeRateBps =
-        grossValuePerSecondUsd > 0 ? (totalOpexUsdPerYear / (grossValuePerSecondUsd * SECONDS_PER_YEAR)) * 10_000 : 0;
-
-    const updateInput = <Key extends keyof ModelInputs>(key: Key, value: ModelInputs[Key]) => {
-        setPreset(null);
-        setInputs(previous => ({ ...previous, [key]: value }));
-    };
-
-    const updateDemand = <Key extends keyof DemandInputs>(key: Key, value: DemandInputs[Key]) => {
-        setPreset(null);
-        setDemand(previous => ({ ...previous, [key]: value }));
-    };
-
-    const updateArrivingDemand = (key: ArrivingDemandKey, value: number) => {
-        setPreset(null);
-        setDemand(previous => clampArrivingDemand(previous, key, value));
-    };
-
-    // A channel cannot be shorter than one of its own sessions, so raising the settlement clock past the
-    // current channel lifetime bumps the lifetime up to the smallest option that still contains the clock.
-    // Keeps K ≥ 1 meaningful and makes the K=1 corner reachable only at lifetime == clock (where v2 == v1).
-    const updateSettlementClock = (clockSeconds: number) => {
-        setPreset(null);
-        setDemand(previous => {
-            if (clockSeconds > 0 && previous.channelLifetimeSeconds < clockSeconds) {
-                const bumped = CHANNEL_LIFETIME_OPTIONS.find(option => option.value >= clockSeconds);
-                if (bumped) {
-                    return { ...previous, channelLifetimeSeconds: bumped.value, settlementClockSeconds: clockSeconds };
-                }
-            }
-            return { ...previous, settlementClockSeconds: clockSeconds };
-        });
-    };
-
-    // Toggle a timeline SIMD, then recompute the SIMD-controlled inputs from baseline by stacking every
-    // active SIMD's delta in array order. Non-SIMD fields (mode, checkpoint cadence, reclaim batch, etc.)
-    // are preserved; the checkpoint batch is clamped to whatever the new packing regime allows.
-    const simdParamsFor = (ids: readonly string[]): SimdParams =>
-        SIMDS.reduce<SimdParams>(
-            (accumulated, simd) => (ids.includes(simd.id) && simd.apply ? simd.apply(accumulated) : accumulated),
-            { ...BASELINE_SIMD_PARAMS },
-        );
-
-    const toggleSimd = (id: string) => {
-        const next = activeSimds.includes(id) ? activeSimds.filter(other => other !== id) : [...activeSimds, id];
-        const params = simdParamsFor(next);
-        setPreset(null);
-        setActiveSimds(next);
-        setInputs(previous => {
-            const merged = { ...previous, ...params };
-            return {
-                ...merged,
-                checkpointBatchSize: Math.min(
-                    merged.checkpointBatchSize,
-                    checkpointMaxBatch(merged.scheme, merged.largeTx),
-                ),
-            };
-        });
-    };
-
-    // Load a full, verified-to-fit scenario from a pill selection: demand (scale + 1-week lifetime + the
-    // resolved cash-sweep window), the active-SIMD set (horizon), and the horizon's settlement stack (today:
-    // v1 + x402 with a demand-scaled verify fleet; long-term: v2 + MPP + the resolved checkpoint cadence).
-    // Applied atomically so the app lands directly on a fitting shape.
-    const applyPreset = (sel: PresetSelection) => {
-        const shape = PRESET_SHAPES[presetKey(sel)];
-        const rail = PRESET_RAIL[sel.horizon];
-        const simdIds = sel.horizon === 'longterm' ? PRESET_SIMD_IDS : [];
-        const params = simdParamsFor(simdIds);
-        setPreset(sel);
-        setActiveSimds(simdIds);
-        setDemand(previous => ({
-            ...previous,
-            averageRequestsPerMinutePerUser: 60,
-            channelLifetimeSeconds: PRESET_LIFETIME_SECONDS,
-            settlementClockSeconds: shape.clock,
-            users: PRESET_USERS[sel.scale],
-        }));
-        setInputs(previous => ({
-            ...previous,
-            ...params,
-            checkpointBatchSize: Math.min(rail.checkpointBatch, checkpointMaxBatch(rail.scheme, params.largeTx)),
-            checkpointClockSeconds: shape.checkpoint,
-            mode: rail.mode,
-            reclaimBatchSize: 8,
-            scheme: rail.scheme,
-            // x402 (today) binds the off-chain Ed25519 plane, so scale the verify fleet to the demand; MPP
-            // (long-term) is operator-signed and ignores this knob.
-            voucherVerifyPerSecond:
-                sel.horizon === 'today'
-                    ? Math.min(PRESET_VERIFY_MAX, PRESET_USERS[sel.scale])
-                    : previous.voucherVerifyPerSecond,
-        }));
-    };
-    // Clicking a pill fills any unset axis from a sensible default (10M · today · unoptimized), then re-resolves.
     const choosePreset = (patch: Partial<PresetSelection>) => {
-        const current: PresetSelection = preset ?? { cheapest: false, fastest: false, horizon: 'today', scale: '10M' };
-        applyPreset({ ...current, ...patch });
+        dispatch({ patch, type: 'select-preset' });
     };
 
     const activeBaseMethod = baseMethodOf(inputs.mode);
     const activeScheme = inputs.scheme;
 
-    // Base rail: vanilla / v1 / v2. Selecting vanilla clears any scheme (vanilla carries no vouchers).
-    // Going from vanilla INTO a channel defaults the scheme to x402 (the common client-signed path);
-    // switching between v1 and v2 keeps whatever scheme is currently selected (scheme ⟂ base).
     const selectBaseMethod = (base: BaseMethod) => {
-        const mode: ModelMode = base === 'vanilla' ? 'vanilla' : base === 'v1' ? 'channel-v1' : 'channel-v2';
-        if (mode === inputs.mode) return;
-        setPreset(null);
-        const transferCostUnits =
-            inputs.transferKind === 'spl-token' ? SPL_TOKEN_TRANSFER_COST_UNITS : TOKEN_2022_TRANSFER_COST_UNITS;
-        setInputs(previous => {
-            const enteringChannel = mode !== 'vanilla' && previous.mode === 'vanilla';
-            const scheme: SettlementScheme = mode === 'vanilla' ? 'none' : enteringChannel ? 'x402' : previous.scheme;
-            // Keep the checkpoint batch valid for the scheme; x402's default fits its size-bound cap.
-            const checkpointBatchSize = enteringChannel ? X402_CHECKPOINT_DEFAULT_BATCH : previous.checkpointBatchSize;
-            return { ...previous, checkpointBatchSize, mode, scheme, transferCostUnits };
-        });
+        dispatch({ base, type: 'select-base' });
     };
-    // Settlement scheme: x402 (client-signed) or MPP (operator-signed), layered on the current channel base
-    // (does NOT change v1/v2). Clicking the active scheme again clears it back to a plain channel. Selecting
-    // a scheme resets the checkpoint batch to that scheme's natural default but does NOT auto-enable the
-    // checkpoint cadence — checkpoints stay opt-in via the cadence knob.
     const selectScheme = (scheme: 'x402' | 'mpp') => {
-        setPreset(null);
-        setInputs(previous => {
-            const nextScheme: SettlementScheme = previous.scheme === scheme ? 'none' : scheme;
-            const checkpointBatchSize =
-                nextScheme === 'mpp'
-                    ? MPP_CHECKPOINT_DEFAULT_BATCH
-                    : nextScheme === 'x402'
-                      ? X402_CHECKPOINT_DEFAULT_BATCH
-                      : previous.checkpointBatchSize;
-            return { ...previous, checkpointBatchSize, scheme: nextScheme };
-        });
+        dispatch({ scheme, type: 'select-scheme' });
     };
 
     const selectTransferKind = (transferKind: TransferKind) => {
-        setPreset(null);
-        const transferCostUnits =
-            transferKind === 'spl-token' ? SPL_TOKEN_TRANSFER_COST_UNITS : TOKEN_2022_TRANSFER_COST_UNITS;
-        setInputs(previous => ({ ...previous, transferCostUnits, transferKind }));
+        dispatch({ transferKind, type: 'select-transfer-kind' });
     };
 
     return (
@@ -1098,7 +456,7 @@ export function App() {
                             <button
                                 aria-pressed={!!preset?.cheapest}
                                 className={preset?.cheapest ? 'active' : ''}
-                                onClick={() => choosePreset({ cheapest: !preset?.cheapest })}
+                                onClick={() => dispatch({ objective: 'cheapest', type: 'toggle-preset-objective' })}
                                 type="button"
                             >
                                 Cheapest
@@ -1106,7 +464,7 @@ export function App() {
                             <button
                                 aria-pressed={!!preset?.fastest}
                                 className={preset?.fastest ? 'active' : ''}
-                                onClick={() => choosePreset({ fastest: !preset?.fastest })}
+                                onClick={() => dispatch({ objective: 'fastest', type: 'toggle-preset-objective' })}
                                 type="button"
                             >
                                 Fastest
@@ -1144,7 +502,7 @@ export function App() {
                                         <input
                                             aria-label={`Toggle ${simd.label}`}
                                             checked={on}
-                                            onChange={() => toggleSimd(simd.id)}
+                                            onChange={() => dispatch({ id: simd.id, type: 'toggle-simd' })}
                                             type="checkbox"
                                         />
                                     ) : (
@@ -1184,7 +542,7 @@ export function App() {
                         format={formatCompact}
                         help="Concurrent users or agents making paid requests"
                         label="Payers (users / agents)"
-                        onChange={value => updateArrivingDemand('users', value)}
+                        onChange={value => dispatch({ key: 'users', type: 'update-arriving-demand', value })}
                         options={USER_STEPS}
                         value={demand.users}
                     />
@@ -1194,15 +552,17 @@ export function App() {
                         label="Avg RPM/payer"
                         max={500}
                         min={0}
-                        onChange={value => updateArrivingDemand('averageRequestsPerMinutePerUser', value)}
+                        onChange={value =>
+                            dispatch({ key: 'averageRequestsPerMinutePerUser', type: 'update-arriving-demand', value })
+                        }
                         step={1}
                         value={demand.averageRequestsPerMinutePerUser}
                     />
                     <SelectKnob
                         disabled={inputs.mode === 'vanilla'}
-                        help="Session window: how long a channel batches vouchers before its single settle + close. Disabled settles every voucher on-chain."
-                        label="Batch settlement clock"
-                        onChange={updateSettlementClock}
+                        help="Cash delivery/refill cadence. The channel stays OPEN; optional checkpoints control faster enforceability. Disabled uses only terminal close."
+                        label="Cash sweep clock"
+                        onChange={value => dispatch({ type: 'update-settlement-clock', value })}
                         options={SETTLEMENT_CLOCK_OPTIONS}
                         value={demand.settlementClockSeconds}
                     />
@@ -1297,8 +657,8 @@ export function App() {
                     <small>
                         {isChannel
                             ? settlementClockEnabled
-                                ? `A ${formatCompact(demand.settlementClockSeconds, 2)}s session carries ${formatCompact(paymentsPerChannel, 2)} payments/channel (derived, not chosen), so one ${formatInteger(costPerLifecycle)}-unit lifecycle amortizes to ${formatCompact(costPerLogicalPayment, 2)} units/payment; ${formatCompact(channelLifecyclesPerSecond, 2)} channels open+settle+close per second.`
-                                : 'Settlement clock disabled: one payment per channel, so every payment pays a full channel lifecycle — channels only amortize with a session window.'
+                                ? `A ${formatCompact(demand.settlementClockSeconds, 2)}s cash window carries ${formatCompact(requestsPerSettlement, 2)} payments/channel. The same channel remains OPEN for ${formatCompact(channelLifeSeconds, 2)}s and carries ${formatCompact(paymentsPerChannel, 2)} payments before one ${formatInteger(costPerLifecycle)}-unit terminal lifecycle; all selected planes amortize to ${formatCompact(costPerLogicalPayment, 2)} units/payment.`
+                                : `Cash sweeps disabled: vouchers accumulate until the ${formatCompact(channelLifeSeconds, 2)}s terminal channel close. The full lifecycle amortizes across ${formatCompact(paymentsPerChannel, 2)} payments/channel.`
                             : 'Vanilla always sends one token transfer per request; the settlement clock applies only to payment channels.'}
                     </small>
                 </div>
@@ -1309,8 +669,8 @@ export function App() {
                         {formatCompact(nominalBudgetPerSecond, 2)} CU/s
                     </strong>
                     <small>
-                        {formatPercent(inputs.availableCapacityPercent)} is available to this workload, giving a{' '}
-                        {formatCompact(maximumPaymentsPerSecond, 2)} req/s ceiling for the selected path
+                        {formatPercent(inputs.availableCapacityPercent)} is available to this workload, giving an{' '}
+                        {formatCompact(maximumPaymentsPerSecond, 2)} req/s equivalent ceiling at this traffic shape
                         {isChannel ? ` at ${formatInteger(paymentsPerChannel)} payments/channel` : ''}.
                     </small>
                 </div>
@@ -1362,9 +722,11 @@ export function App() {
                             {formatPercent(checkpointBudgetSharePercent)} of budget)
                         </strong>
                         <small>
-                            {inputs.scheme === 'mpp'
-                                ? `One operator signer means ADR-004 batches ${formatInteger(inputs.checkpointBatchSize)} distinct customers into a single signed settle (n ≤ ${MPP_CHECKPOINT_MAX_BATCH}, account-bound), so each checkpoint is ~${formatInteger(checkpointCostPerChannel('mpp', inputs.checkpointBatchSize))} CU/channel versus ~${formatInteger(checkpointCostPerChannel('x402', X402_CHECKPOINT_DEFAULT_BATCH))} for client-signed — the same enforceability at a fraction of the on-chain cost, with no verify fleet. Interim settles run on top of the cash-sweep boundary; disable the checkpoint cadence to collapse this mode to plain v2.`
-                                : `Client-signed vouchers are made enforceable by interim settles that pack [Ed25519, settle] pairs, ${formatInteger(inputs.checkpointBatchSize)}/tx (size-bound at n ≤ ${X402_CHECKPOINT_MAX_BATCH} under a 4kB tx). Distinct customer signers → no ADR-004 batching, so this plane consumes on-chain budget independently of the off-chain verify fleet. Interim settles run on top of the cash-sweep boundary; disable the checkpoint cadence to collapse this mode to plain v2.`}
+                            {!inputs.batchSettlementAvailable
+                                ? 'Batch settlement is not available in this horizon: each checkpoint is one channel per transaction. Boundary-aligned checkpoints are not charged twice.'
+                                : inputs.scheme === 'mpp'
+                                  ? `One operator signer means ADR-004 batches ${formatInteger(effectiveCheckpointBatch)} distinct customers into a single signed settle (n ≤ ${MPP_CHECKPOINT_MAX_BATCH}, account-bound), so each checkpoint is ~${formatInteger(checkpointCostPerChannel('mpp', effectiveCheckpointBatch))} CU/channel versus ~${formatInteger(checkpointCostPerChannel('x402', X402_CHECKPOINT_DEFAULT_BATCH))} for client-signed. Boundary-aligned checkpoints are not charged twice.`
+                                  : `Client-signed vouchers use packed [Ed25519, settle] pairs, ${formatInteger(effectiveCheckpointBatch)}/tx (current selected cap ${checkpointBatchMaximum}). Distinct customer signers prevent ADR-004 aggregation. Boundary-aligned checkpoints are not charged twice.`}
                         </small>
                     </div>
                 )}
@@ -1379,17 +741,17 @@ export function App() {
                             {onChainBacklogFactor > 1.05 ? (
                                 <>
                                     Backlog: at the offered {formatCompact(logicalRequestsPerSecond, 2)} req/s the chain
-                                    is {formatCompact(onChainBacklogFactor, 2)}× under budget. One{' '}
-                                    {formatCompact(settlementWindowSeconds, 2)}s session generates{' '}
+                                    requires {formatCompact(onChainBacklogFactor, 2)}× the available budget. One{' '}
+                                    {formatCompact(settlementWindowSeconds, 2)}s cash window generates{' '}
                                     {formatCompact(onChainTxPerWindow, 2)} settlement transactions that take{' '}
                                     {formatCompact(windowDrainSeconds, 2)}s of chain-time to land.
                                     <br />
                                     ⚠️ the queue grows without bound, so this rate is not actually settleable.
                                 </>
                             ) : checkpointsEnabled ? (
-                                `Enforceable within ${formatCompact(settlementLatencySeconds, 2)}s: interim checkpoints make accrued value claimable on-chain at the ${formatCompact(inputs.checkpointClockSeconds, 2)}s checkpoint cadence, ahead of the ${formatCompact(settlementWindowSeconds, 2)}s cash-sweep close. One cash-sweep window generates ${formatCompact(onChainTxPerWindow, 2)} settlement transactions.`
+                                `Enforceable within ${formatCompact(settlementLatencySeconds, 2)}s: interim checkpoints make accrued value claimable on-chain at the ${formatCompact(inputs.checkpointClockSeconds, 2)}s checkpoint cadence, ahead of the ${formatCompact(settlementWindowSeconds, 2)}s OPEN-state cash boundary. One cash window generates ${formatCompact(onChainTxPerWindow, 2)} transactions.`
                             ) : (
-                                `Settlements clear within the window: a payment finalizes on-chain up to ${formatCompact(settlementLatencySeconds, 2)}s after it is made (one session length). One session generates ${formatCompact(onChainTxPerWindow, 2)} settlement transactions.`
+                                `Settlements clear within the cash window: a payment becomes enforceable on-chain within ${formatCompact(settlementLatencySeconds, 2)}s. One cash window generates ${formatCompact(onChainTxPerWindow, 2)} transactions.`
                             )}
                         </small>
                     </div>
@@ -1430,7 +792,7 @@ export function App() {
                             label="Block cost limit"
                             max={150_000_000}
                             min={30_000_000}
-                            onChange={value => updateInput('blockCostUnits', value)}
+                            onChange={value => dispatch({ key: 'blockCostUnits', type: 'update-input', value })}
                             step={2_500_000}
                             value={inputs.blockCostUnits}
                         />
@@ -1440,7 +802,7 @@ export function App() {
                             label="Slot duration"
                             max={500}
                             min={150}
-                            onChange={value => updateInput('slotMs', value)}
+                            onChange={value => dispatch({ key: 'slotMs', type: 'update-input', value })}
                             step={10}
                             value={inputs.slotMs}
                         />
@@ -1450,7 +812,9 @@ export function App() {
                             label="Available capacity"
                             max={100}
                             min={10}
-                            onChange={value => updateInput('availableCapacityPercent', value)}
+                            onChange={value =>
+                                dispatch({ key: 'availableCapacityPercent', type: 'update-input', value })
+                            }
                             step={5}
                             value={inputs.availableCapacityPercent}
                         />
@@ -1478,7 +842,7 @@ export function App() {
                                 label="Cost per transfer"
                                 max={30_000}
                                 min={500}
-                                onChange={value => updateInput('transferCostUnits', value)}
+                                onChange={value => dispatch({ key: 'transferCostUnits', type: 'update-input', value })}
                                 step={1}
                                 value={inputs.transferCostUnits}
                             />
@@ -1500,19 +864,21 @@ export function App() {
                                     label="Rent per live channel"
                                     max={0.005}
                                     min={0.0004}
-                                    onChange={value => updateInput('rentPerChannelSol', value)}
+                                    onChange={value =>
+                                        dispatch({ key: 'rentPerChannelSol', type: 'update-input', value })
+                                    }
                                     step={0.000000001}
                                     value={inputs.rentPerChannelSol}
                                 />
-                                {isPersistentChannel(inputs.mode) && (
-                                    <SelectKnob
-                                        help="ADR-005: how long a channel stays open across sessions before a real teardown"
-                                        label="Channel lifetime"
-                                        onChange={value => updateDemand('channelLifetimeSeconds', value)}
-                                        options={channelLifetimeOptions}
-                                        value={demand.channelLifetimeSeconds}
-                                    />
-                                )}
+                                <SelectKnob
+                                    help="How long the same deployed channel stays OPEN before terminal close and reclaim"
+                                    label="Channel lifetime"
+                                    onChange={value =>
+                                        dispatch({ key: 'channelLifetimeSeconds', type: 'update-demand', value })
+                                    }
+                                    options={channelLifetimeOptions}
+                                    value={demand.channelLifetimeSeconds}
+                                />
                                 <div className="batch-table">
                                     <div>
                                         <span>Payments / channel (derived)</span>
@@ -1523,31 +889,23 @@ export function App() {
                                         <strong>{formatCompact(costPerLogicalPayment, 2)} units</strong>
                                     </div>
                                     <div>
-                                        <span>Session window</span>
+                                        <span>Channel lifetime</span>
                                         <strong>
                                             {Number.isFinite(channelLifeSeconds)
                                                 ? `${formatCompact(channelLifeSeconds, 2)} s`
                                                 : '∞'}
                                         </strong>
                                     </div>
-                                    {isPersistentChannel(inputs.mode) && (
-                                        <div>
-                                            <span>Sessions / channel (K)</span>
-                                            <strong>{formatCompact(sessionsPerChannel, 2)}</strong>
-                                        </div>
-                                    )}
                                     <div>
-                                        <span>
-                                            {isPersistentChannel(inputs.mode)
-                                                ? 'Channel builds+teardowns'
-                                                : 'Channel opens+closes'}
-                                        </span>
+                                        <span>Cash windows / channel</span>
+                                        <strong>{formatCompact(sessionsPerChannel, 2)}</strong>
+                                    </div>
+                                    <div>
+                                        <span>Channel builds+teardowns</span>
                                         <strong>{formatCompact(channelBuildsPerSecond, 2)} / second</strong>
                                     </div>
                                     <div>
-                                        <span>
-                                            {isPersistentChannel(inputs.mode) ? 'Re-arm rate' : 'Settlement rate'}
-                                        </span>
+                                        <span>On-chain watermark writes</span>
                                         <strong>{formatCompact(settlementsPerSecond, 2)} / second</strong>
                                     </div>
                                     <div>
@@ -1565,46 +923,56 @@ export function App() {
                                     label="Reclaim batch"
                                     max={32}
                                     min={1}
-                                    onChange={value => updateInput('reclaimBatchSize', value)}
+                                    onChange={value =>
+                                        dispatch({ key: 'reclaimBatchSize', type: 'update-input', value })
+                                    }
                                     step={1}
                                     value={inputs.reclaimBatchSize}
                                 />
                                 {hasCheckpointScheme && (
                                     <>
                                         <SelectKnob
-                                            help="Cadence of interim enforceability settles between cash sweeps. Disabled = plain v2 (no checkpoints)."
+                                            help="Cadence of interim enforceability settles between cash sweeps. Disabled = no extra checkpoints."
                                             label="Checkpoint cadence"
-                                            onChange={value => updateInput('checkpointClockSeconds', value)}
+                                            onChange={value =>
+                                                dispatch({ key: 'checkpointClockSeconds', type: 'update-input', value })
+                                            }
                                             options={SETTLEMENT_CLOCK_OPTIONS}
                                             value={inputs.checkpointClockSeconds}
                                         />
                                         <RangeKnob
-                                            disabled={!checkpointsEnabled}
+                                            disabled={!checkpointsEnabled || !inputs.batchSettlementAvailable}
                                             format={value => `${value} settles / tx`}
                                             help={
-                                                inputs.scheme === 'mpp'
-                                                    ? 'ADR-004: distinct customers under one operator signer, account-bound (≤ 59)'
-                                                    : 'Packed [Ed25519, settle] pairs, size-bound (5 today; ≤ 16 under a 4kB tx)'
+                                                !inputs.batchSettlementAvailable
+                                                    ? 'Unavailable today; checkpoints use one channel per transaction'
+                                                    : inputs.scheme === 'mpp'
+                                                      ? 'ADR-004: distinct customers under one operator signer, account-bound (≤ 59)'
+                                                      : `Packed [Ed25519, settle] pairs, size-bound (max ${checkpointBatchMaximum})`
                                             }
                                             label="Checkpoint batch (n)"
-                                            max={checkpointMaxBatch(inputs.scheme, inputs.largeTx)}
+                                            max={checkpointBatchMaximum}
                                             min={1}
-                                            onChange={value => updateInput('checkpointBatchSize', value)}
+                                            onChange={value =>
+                                                dispatch({ key: 'checkpointBatchSize', type: 'update-input', value })
+                                            }
                                             step={1}
-                                            value={inputs.checkpointBatchSize}
+                                            value={effectiveCheckpointBatch}
                                         />
                                     </>
                                 )}
                                 <div className="batch-table">
-                                    {isPersistentChannel(inputs.mode) ? (
+                                    {usesRearm(inputs.mode) ? (
                                         <>
                                             <div>
                                                 <span>Re-arm</span>
-                                                <strong>{formatInteger(REARM_COST_UNITS)} units / session</strong>
+                                                <strong>{formatInteger(REARM_COST_UNITS)} units / cash boundary</strong>
                                             </div>
                                             <div>
                                                 <span>Top-up</span>
-                                                <strong>{formatInteger(TOP_UP_COST_UNITS)} units / session</strong>
+                                                <strong>
+                                                    {formatInteger(TOP_UP_COST_UNITS)} units / cash boundary
+                                                </strong>
                                             </div>
                                             {checkpointsEnabled && (
                                                 <>
@@ -1624,34 +992,46 @@ export function App() {
                                             )}
                                             <div>
                                                 <span>Build+teardown</span>
-                                                <strong>once / {formatCompact(sessionsPerChannel, 2)} sessions</strong>
+                                                <strong>
+                                                    once / {formatCompact(sessionsPerChannel, 2)} cash windows
+                                                </strong>
                                             </div>
                                         </>
                                     ) : (
                                         <>
                                             <div>
-                                                <span>Open</span>
-                                                <strong>1 channel / tx</strong>
+                                                <span>Voucher settle</span>
+                                                <strong>
+                                                    {formatInteger(SETTLE_COST_UNITS)} units / cash boundary
+                                                </strong>
                                             </div>
                                             <div>
-                                                <span>Terminal distribute</span>
-                                                <strong>1 channel / tx</strong>
+                                                <span>OPEN distribute</span>
+                                                <strong>
+                                                    {formatInteger(INTERIM_DISTRIBUTE_COST_UNITS)} units / cash boundary
+                                                </strong>
+                                            </div>
+                                            <div>
+                                                <span>Top-up</span>
+                                                <strong>
+                                                    {formatInteger(TOP_UP_COST_UNITS)} units / cash boundary
+                                                </strong>
                                             </div>
                                         </>
                                     )}
                                     <div>
-                                        <span>
-                                            {isPersistentChannel(inputs.mode)
-                                                ? 'Boundary cost / session'
-                                                : 'Lifecycle cost'}
-                                        </span>
-                                        <strong>{formatInteger(costPerLifecycle)} units / channel</strong>
+                                        <span>Cash-boundary cost</span>
+                                        <strong>{formatInteger(cashBoundaryCostUnits)} units / channel</strong>
+                                    </div>
+                                    <div>
+                                        <span>Full lifecycle cost</span>
+                                        <strong>{formatInteger(costPerLifecycle)} units / channel lifetime</strong>
                                     </div>
                                 </div>
                                 <p className="batch-caveat">
                                     {inputs.mode === 'channel-v1'
-                                        ? 'One channel = one session: open, a single settle_and_seal + distribute at idle-close, and a batched reclaim. Payments/channel is derived from the session window × request rate (capped by escrow deposit ÷ payment value), so longer sessions amortize the fixed open+distribute over more payments. Lengthen the session clock until the verdict fits the target — the crossover scales linearly with it.'
-                                        : 'ADR-005 re-arm (proposed, not benchmarked): the channel stays open across sessions, so each session pays only a cheap rearm+top_up (~29.2k units) instead of a full open+close+reclaim (~60.7k). The one-time build/teardown amortizes over K = lifetime ÷ session window, so raising Channel lifetime drives the boundary cost toward just the rearm. This attacks the fixed toll that forces long windows — the capital-recycling plane of the decoupled architecture, not a per-payment saving.'}
+                                        ? 'Deployed v1 is persistent: each cash boundary settles the latest voucher, runs OPEN-state distribute, and tops the escrow back up. The channel only pays open + terminal close + reclaim once per Channel lifetime. This follows the on-chain state machine; a cash sweep does not close the channel.'
+                                        : 'ADR-005 re-arm is proposed and unbenchmarked. It combines voucher settlement, distribution, and unused-deposit refund before top-up (~29.2k planning units). Its benefit is capital reset semantics; against deployed settle + OPEN distribute + top-up (~28.6k measured/estimated units), it is not currently a scheduler-capacity win.'}
                                 </p>
                             </div>
 
@@ -1664,7 +1044,9 @@ export function App() {
                                     label="Voucher verification rate"
                                     max={20_000_000}
                                     min={250_000}
-                                    onChange={value => updateInput('voucherVerifyPerSecond', value)}
+                                    onChange={value =>
+                                        dispatch({ key: 'voucherVerifyPerSecond', type: 'update-input', value })
+                                    }
                                     step={250_000}
                                     value={inputs.voucherVerifyPerSecond}
                                 />
@@ -1734,7 +1116,7 @@ export function App() {
                     <strong>
                         {isChannel ? formatCompact(settlementsPerSecond, 2) : formatInteger(inputs.transferCostUnits)}
                     </strong>
-                    <small>{isChannel ? 'settlement boundaries / second (one per session)' : 'scheduler units'}</small>
+                    <small>{isChannel ? 'watermark writes / second across all planes' : 'scheduler units'}</small>
                 </article>
                 <article className="metric-card">
                     <span>{isChannel ? 'Concurrent live channels' : 'Required scheduler load'}</span>
@@ -1775,7 +1157,9 @@ export function App() {
                         label="Avg transaction value"
                         max={1}
                         min={0.001}
-                        onChange={value => updateDemand('averageTransactionValueUsd', value)}
+                        onChange={value =>
+                            dispatch({ key: 'averageTransactionValueUsd', type: 'update-demand', value })
+                        }
                         step={0.001}
                         value={demand.averageTransactionValueUsd}
                     />
@@ -1785,7 +1169,7 @@ export function App() {
                         label="SOL price"
                         max={500}
                         min={10}
-                        onChange={value => updateDemand('solPriceUsd', value)}
+                        onChange={value => dispatch({ key: 'solPriceUsd', type: 'update-demand', value })}
                         step={5}
                         value={demand.solPriceUsd}
                     />
@@ -1795,7 +1179,7 @@ export function App() {
                         label="Priority fee / tx"
                         max={100_000}
                         min={0}
-                        onChange={value => updateDemand('priorityFeeLamportsPerTx', value)}
+                        onChange={value => dispatch({ key: 'priorityFeeLamportsPerTx', type: 'update-demand', value })}
                         step={1_000}
                         value={demand.priorityFeeLamportsPerTx}
                     />
@@ -1805,17 +1189,19 @@ export function App() {
                         label="Cost of capital"
                         max={25}
                         min={0}
-                        onChange={value => updateDemand('capitalCostAnnualPercent', value)}
+                        onChange={value => dispatch({ key: 'capitalCostAnnualPercent', type: 'update-demand', value })}
                         step={0.5}
                         value={demand.capitalCostAnnualPercent}
                     />
                     <RangeKnob
                         format={value => `$${value.toFixed(3)} / M`}
-                        help="Placeholder — no benchmark yet. Off-chain cost to verify one client Ed25519 voucher per payment (parse + verify + watermark + persist, incl. HA), $ per million. Band ≈ $0.002 (bare batch verify) to $0.05 (fat handler). Applies to plain channels + x402; MPP and vanilla pay $0."
+                        help="Placeholder — no benchmark yet. Cost of the client-Ed25519 verification path only, $ per million. Applies to plain channels + x402; MPP and vanilla have $0 for this specific line, not $0 total infrastructure."
                         label="Off-chain verify penalty"
                         max={0.1}
                         min={0}
-                        onChange={value => updateDemand('voucherVerifyCostUsdPerMillion', value)}
+                        onChange={value =>
+                            dispatch({ key: 'voucherVerifyCostUsdPerMillion', type: 'update-demand', value })
+                        }
                         step={0.005}
                         value={demand.voucherVerifyCostUsdPerMillion}
                     />
@@ -1931,24 +1317,33 @@ export function App() {
                                 <article className="metric-card">
                                     <span>Verify fleet cost</span>
                                     <strong>{formatUsd(verifyComputeUsdPerYear)}</strong>
-                                    <small>per year · {formatUsd(verifyComputeUsdPerSecond * SECONDS_PER_DAY)} / day</small>
+                                    <small>
+                                        per year · {formatUsd(verifyComputeUsdPerSecond * SECONDS_PER_DAY)} / day
+                                    </small>
                                 </article>
                                 <article className="metric-card">
                                     <span>Verifies / second</span>
                                     <strong>{formatCompact(voucherVerifiesPerSecond, 2)}</strong>
-                                    <small>{perPaymentVerify ? 'one per accepted payment' : 'none — no per-payment verify'}</small>
+                                    <small>
+                                        {perPaymentVerify ? 'one per accepted payment' : 'none — no per-payment verify'}
+                                    </small>
                                 </article>
                                 <article className="metric-card">
                                     <span>Verify take-rate</span>
                                     <strong>
                                         {formatTakeRate(
                                             grossValuePerSecondUsd > 0
-                                                ? (verifyComputeUsdPerYear / (grossValuePerSecondUsd * SECONDS_PER_YEAR)) *
+                                                ? (verifyComputeUsdPerYear /
+                                                      (grossValuePerSecondUsd * SECONDS_PER_YEAR)) *
                                                       10_000
                                                 : 0,
                                         )}
                                     </strong>
-                                    <small>{perPaymentVerify ? 'MPP drops this to $0' : 'eliminated by operator-signing'}</small>
+                                    <small>
+                                        {perPaymentVerify
+                                            ? 'MPP removes this verification line'
+                                            : '$0 for this line · other request costs remain'}
+                                    </small>
                                 </article>
                             </div>
                         </section>
@@ -1968,8 +1363,9 @@ export function App() {
                     <span>{formatTakeRate(allInTakeRateBps)} of annual gross value</span>
                 </section>
                 <p className="opex-note">
-                    Fees assume {signaturesPerTransaction} signature{signaturesPerTransaction === 1 ? '' : 's'}/tx at{' '}
-                    {formatInteger(BASE_FEE_LAMPORTS_PER_SIGNATURE)} lamports each
+                    Fees are operation-specific at {formatInteger(BASE_FEE_LAMPORTS_PER_SIGNATURE)} lamports per
+                    transaction or precompile signature: current settles cost 10,000 lamports, while standalone
+                    distribute and batched reclaim cost 5,000
                     {demand.priorityFeeLamportsPerTx > 0
                         ? ` + ${formatInteger(demand.priorityFeeLamportsPerTx)} lamports priority`
                         : ''}
@@ -2016,8 +1412,8 @@ export function App() {
 
             <footer>
                 <p>
-                    Mainnet scheduler costs: SPL Token 1,911 · Token-2022 6,536 · channel v1 lifecycle 61,622. Channel
-                    v2 remains an ADR-005 planning envelope until implemented and benchmarked.
+                    Mainnet scheduler costs: SPL Token 1,911 · Token-2022 6,536 · channel lifecycle 60,709 with reclaim
+                    batch 8 (61,622 with standalone reclaim). Channel v2 remains an ADR-005 planning envelope.
                 </p>
             </footer>
         </main>

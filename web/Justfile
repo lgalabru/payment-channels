@@ -26,6 +26,15 @@ dev_session := "one-mil-ui"
 @lint:
   pnpm lint
 
+@test:
+  pnpm test
+
+@ci:
+  pnpm exec prettier --check src tests sweep.mjs
+  pnpm lint
+  pnpm build
+  pnpm test
+
 @format:
   pnpm format
 
