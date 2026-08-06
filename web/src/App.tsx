@@ -817,19 +817,21 @@ export function App() {
     const activeBaseMethod = baseMethodOf(inputs.mode);
     const activeScheme = inputs.scheme;
 
-    // Base rail: vanilla / v1 / v2. Selecting vanilla clears any scheme (vanilla carries no vouchers);
-    // switching between v1 and v2 keeps the scheme (the scheme is orthogonal to the base).
+    // Base rail: vanilla / v1 / v2. Selecting vanilla clears any scheme (vanilla carries no vouchers).
+    // Going from vanilla INTO a channel defaults the scheme to x402 (the common client-signed path);
+    // switching between v1 and v2 keeps whatever scheme is currently selected (scheme ⟂ base).
     const selectBaseMethod = (base: BaseMethod) => {
         const mode: ModelMode = base === 'vanilla' ? 'vanilla' : base === 'v1' ? 'channel-v1' : 'channel-v2';
         if (mode === inputs.mode) return;
         const transferCostUnits =
             inputs.transferKind === 'spl-token' ? SPL_TOKEN_TRANSFER_COST_UNITS : TOKEN_2022_TRANSFER_COST_UNITS;
-        setInputs(previous => ({
-            ...previous,
-            mode,
-            scheme: mode === 'vanilla' ? 'none' : previous.scheme,
-            transferCostUnits,
-        }));
+        setInputs(previous => {
+            const enteringChannel = mode !== 'vanilla' && previous.mode === 'vanilla';
+            const scheme: SettlementScheme = mode === 'vanilla' ? 'none' : enteringChannel ? 'x402' : previous.scheme;
+            // Keep the checkpoint batch valid for the scheme; x402's default fits its size-bound cap.
+            const checkpointBatchSize = enteringChannel ? X402_CHECKPOINT_DEFAULT_BATCH : previous.checkpointBatchSize;
+            return { ...previous, checkpointBatchSize, mode, scheme, transferCostUnits };
+        });
     };
     // Settlement scheme: x402 (client-signed) or MPP (operator-signed), layered on the current channel base
     // (does NOT change v1/v2). Clicking the active scheme again clears it back to a plain channel. Selecting
