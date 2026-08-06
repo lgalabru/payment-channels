@@ -518,10 +518,10 @@ input[type='range'] {
 }
 
 .knob-meta span {
-    color: var(--muted);
-    font-size: 0.7rem;
-    line-height: 1.35;
-    max-width: 64%;
+    color: rgba(255, 255, 255, 0.78);
+    font-size: 0.76rem;
+    line-height: 1.45;
+    max-width: 68%;
 }
 
 .knob-meta strong {
@@ -1820,7 +1820,10 @@ h1 span {
     color: var(--muted);
 }
 
-.progress-panel .demand-controls .knob-meta span,
+.progress-panel .demand-controls .knob-meta span {
+    color: rgba(255, 255, 255, 0.78);
+}
+
 .progress-panel .progress-number span,
 .progress-panel .capacity-equation small,
 .progress-panel .verdict span,
