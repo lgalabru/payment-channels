@@ -18,8 +18,11 @@ interface ModelInputs {
 interface DemandInputs {
     averageRequestsPerMinutePerUser: number;
     averageTransactionValueUsd: number;
+    capitalCostAnnualPercent: number;
     channelLifetimeSeconds: number;
+    priorityFeeLamportsPerTx: number;
     settlementClockSeconds: number;
+    solPriceUsd: number;
     users: number;
 }
 
@@ -66,6 +69,11 @@ interface SelectKnobProps {
 }
 
 const TARGET_PAYMENTS_PER_SECOND = 10_000_000;
+const LAMPORTS_PER_SOL = 1_000_000_000;
+const BASE_FEE_LAMPORTS_PER_SIGNATURE = 5_000;
+const SECONDS_PER_DAY = 86_400;
+const SECONDS_PER_MONTH = 2_592_000; // 30 days
+const SECONDS_PER_YEAR = 31_536_000; // 365 days
 const SPL_TOKEN_TRANSFER_COST_UNITS = 1_911;
 const TOKEN_2022_TRANSFER_COST_UNITS = 6_536;
 const V1_LIFECYCLE_COST_UNITS = 61_622;
@@ -101,11 +109,25 @@ const SETTLEMENT_CLOCK_OPTIONS = [
     { label: '24h', value: 86_400 },
 ] as const;
 
+const CHANNEL_LIFETIME_OPTIONS = [
+    { label: '5m', value: 300 },
+    { label: '10m', value: 600 },
+    { label: '30m', value: 1_800 },
+    { label: '1h', value: 3_600 },
+    { label: '12h', value: 43_200 },
+    { label: '1d', value: 86_400 },
+    { label: '2d', value: 172_800 },
+    { label: '1w', value: 604_800 },
+] as const;
+
 const DEFAULT_DEMAND: DemandInputs = {
     averageRequestsPerMinutePerUser: 60,
     averageTransactionValueUsd: 0.001,
+    capitalCostAnnualPercent: 8,
     channelLifetimeSeconds: 86_400,
+    priorityFeeLamportsPerTx: 0,
     settlementClockSeconds: 60,
+    solPriceUsd: 150,
     users: 1_000_000,
 };
 
@@ -184,6 +206,13 @@ function formatInteger(value: number): string {
 
 function formatPercent(value: number): string {
     return `${value.toFixed(value >= 10 ? 0 : 1)}%`;
+}
+
+function formatTakeRate(bps: number): string {
+    if (!Number.isFinite(bps)) return '—';
+    if (bps >= 1_000) return `${formatCompact(bps / 100, 1)}% of value`;
+
+    return `${bps >= 100 ? bps.toFixed(0) : bps.toFixed(1)} bps`;
 }
 
 function formatUsd(value: number): string {
@@ -410,14 +439,32 @@ export function App() {
     const [isCustomized, setIsCustomized] = useState(false);
 
     // Mirror the four shareable knobs into the URL query so any configuration is linkable.
+    // Debounced + guarded: dragging a range slider fires an `input` event per pixel, so a single
+    // drag can push dozens of updates/second. Browsers rate-limit history.replaceState (Safari
+    // ~100/30s, Firefox ~50/10s) and throw a SecurityError past the cap — which, thrown from an
+    // effect with no error boundary, unmounts the whole tree and blanks the page. Debouncing
+    // collapses a drag into one write when the user pauses; the try/catch is a belt-and-suspenders
+    // guard so a throttle error can never crash the app.
     useEffect(() => {
         if (typeof window === 'undefined') return;
-        const params = new URLSearchParams();
-        params.set('users', String(demand.users));
-        params.set('rpm', String(demand.averageRequestsPerMinutePerUser));
-        params.set('clock', String(demand.settlementClockSeconds));
-        params.set('method', MODE_TO_QUERY[inputs.mode]);
-        window.history.replaceState(null, '', `${window.location.pathname}?${params.toString()}${window.location.hash}`);
+        const handle = window.setTimeout(() => {
+            const params = new URLSearchParams();
+            params.set('users', String(demand.users));
+            params.set('rpm', String(demand.averageRequestsPerMinutePerUser));
+            params.set('clock', String(demand.settlementClockSeconds));
+            params.set('method', MODE_TO_QUERY[inputs.mode]);
+            try {
+                window.history.replaceState(
+                    null,
+                    '',
+                    `${window.location.pathname}?${params.toString()}${window.location.hash}`,
+                );
+            } catch {
+                // Browser history rate-limit hit during rapid drags. Safe to skip — the URL
+                // resyncs on the next settled change.
+            }
+        }, 200);
+        return () => window.clearTimeout(handle);
     }, [demand, inputs.mode]);
 
     const blocksPerSecond = 1_000 / inputs.slotMs;
@@ -509,6 +556,32 @@ export function App() {
     const onChainTxPerWindow = physicalTransactionsPerSecond * settlementWindowSeconds;
     const windowDrainSeconds = settlementWindowSeconds * onChainBacklogFactor;
     const selectedPhase = PHASES.find(phase => phase.id === selectedPhaseId) ?? PHASES[1];
+
+    // Operating cost: the dollar cost of running the rail at the selected demand. None of this touches
+    // the CU capacity math above — it converts the physical on-chain footprint into fees + tied-up capital.
+    // Most channel transactions (open/settle/rearm/top_up) carry two signatures (payee + fee payer); vanilla
+    // transfers carry one. Base fee is the fixed 5,000 lamports/signature; priority fee is a per-tx knob
+    // (0 by default — realistic while blocks sit ~⅓ full, add it to model congestion pricing).
+    const signaturesPerTransaction = isChannel ? 2 : 1;
+    const networkFeeLamportsPerSecond =
+        physicalTransactionsPerSecond *
+        (signaturesPerTransaction * BASE_FEE_LAMPORTS_PER_SIGNATURE + demand.priorityFeeLamportsPerTx);
+    const networkFeeSolPerSecond = networkFeeLamportsPerSecond / LAMPORTS_PER_SOL;
+    const networkFeeUsdPerSecond = networkFeeSolPerSecond * demand.solPriceUsd;
+    const feeTakeRateBps = grossValuePerSecondUsd > 0 ? (networkFeeUsdPerSecond / grossValuePerSecondUsd) * 10_000 : 0;
+
+    // Working capital tied up (refundable, not burned): channel + escrow rent, plus the escrow float —
+    // value accumulated within one settlement window before it settles on-chain and the deposit refreshes.
+    const rentWorkingCapitalUsd = rentWorkingCapital * demand.solPriceUsd;
+    const escrowFloatUsd = isChannel ? grossValuePerSecondUsd * settlementWindowSeconds : 0;
+    const workingCapitalUsd = rentWorkingCapitalUsd + escrowFloatUsd;
+    const capitalCarryingCostUsdPerYear = workingCapitalUsd * (demand.capitalCostAnnualPercent / 100);
+
+    // All-in operating cost: fees (a burn) + the carrying cost of the refundable capital held in the rail.
+    const feeUsdPerYear = networkFeeUsdPerSecond * SECONDS_PER_YEAR;
+    const totalOpexUsdPerYear = feeUsdPerYear + capitalCarryingCostUsdPerYear;
+    const allInTakeRateBps =
+        grossValuePerSecondUsd > 0 ? (totalOpexUsdPerYear / (grossValuePerSecondUsd * SECONDS_PER_YEAR)) * 10_000 : 0;
 
     const updateInput = <Key extends keyof ModelInputs>(key: Key, value: ModelInputs[Key]) => {
         setInputs(previous => ({ ...previous, [key]: value }));
@@ -644,16 +717,6 @@ export function App() {
                         onChange={value => updateDemand('settlementClockSeconds', value)}
                         options={SETTLEMENT_CLOCK_OPTIONS}
                         value={demand.settlementClockSeconds}
-                    />
-                    <RangeKnob
-                        format={formatUsd}
-                        help="Economic value only; excluded from CU math"
-                        label="Avg transaction value"
-                        max={1}
-                        min={0.001}
-                        onChange={value => updateDemand('averageTransactionValueUsd', value)}
-                        step={0.001}
-                        value={demand.averageTransactionValueUsd}
                     />
                 </div>
                 <div className="settlement-method-heading">
@@ -880,18 +943,11 @@ export function App() {
                                     value={inputs.rentPerChannelSol}
                                 />
                                 {inputs.mode === 'channel-v2' && (
-                                    <RangeKnob
-                                        format={value =>
-                                            value >= 86_400
-                                                ? `${(value / 86_400).toFixed(1)}d`
-                                                : `${Math.round(value / 3_600)}h`
-                                        }
+                                    <SelectKnob
                                         help="ADR-005: how long a channel stays open across sessions before a real teardown"
                                         label="Channel lifetime"
-                                        max={604_800}
-                                        min={3_600}
                                         onChange={value => updateDemand('channelLifetimeSeconds', value)}
-                                        step={3_600}
+                                        options={CHANNEL_LIFETIME_OPTIONS}
                                         value={demand.channelLifetimeSeconds}
                                     />
                                 )}
@@ -1076,18 +1132,113 @@ export function App() {
                         {isChannel ? 'to keep user channels live' : 'verdict uses the configured available percentage'}
                     </small>
                 </article>
-                <article className="metric-card">
-                    <span>Gross transaction value</span>
-                    <strong>{formatUsd(grossValuePerSecondUsd)}</strong>
-                    <small>per second; excluded from CU math</small>
-                </article>
-                <article className="metric-card">
-                    <span>{isChannel ? 'Value per settlement' : 'Average transaction value'}</span>
-                    <strong>{formatUsd(isChannel ? valuePerSettlementUsd : demand.averageTransactionValueUsd)}</strong>
-                    <small>
-                        {isChannel ? `${formatCompact(requestsPerSettlement, 2)} requests amortized` : 'per transfer'}
-                    </small>
-                </article>
+            </section>
+
+            <section aria-labelledby="opex-title" className="panel controls-panel">
+                <div className="section-heading">
+                    <div>
+                        <p className="section-index">04</p>
+                        <h2 id="opex-title">Operating cost</h2>
+                    </div>
+                    <p>Dollar cost of running the rail at the selected demand — network fees and tied-up capital. Separate from the CU capacity math above.</p>
+                </div>
+
+                <div className="demand-controls opex-controls">
+                    <RangeKnob
+                        format={formatUsd}
+                        help="Economic value carried by each request"
+                        label="Avg transaction value"
+                        max={1}
+                        min={0.001}
+                        onChange={value => updateDemand('averageTransactionValueUsd', value)}
+                        step={0.001}
+                        value={demand.averageTransactionValueUsd}
+                    />
+                    <RangeKnob
+                        format={formatUsd}
+                        help="SOL/USD used to price fees and capital"
+                        label="SOL price"
+                        max={500}
+                        min={10}
+                        onChange={value => updateDemand('solPriceUsd', value)}
+                        step={5}
+                        value={demand.solPriceUsd}
+                    />
+                    <RangeKnob
+                        format={value => `${formatInteger(value)} lamports`}
+                        help="Priority fee per tx (0 ≈ today's ~⅓-full blocks)"
+                        label="Priority fee / tx"
+                        max={100_000}
+                        min={0}
+                        onChange={value => updateDemand('priorityFeeLamportsPerTx', value)}
+                        step={1_000}
+                        value={demand.priorityFeeLamportsPerTx}
+                    />
+                    <RangeKnob
+                        format={formatPercent}
+                        help="Annual cost of the refundable capital held in the rail"
+                        label="Cost of capital"
+                        max={25}
+                        min={0}
+                        onChange={value => updateDemand('capitalCostAnnualPercent', value)}
+                        step={0.5}
+                        value={demand.capitalCostAnnualPercent}
+                    />
+                </div>
+
+                <section aria-label="Operating cost metrics" className="metrics-grid">
+                    <article className="metric-card">
+                        <span>Gross transaction value</span>
+                        <strong>{formatUsd(grossValuePerSecondUsd)}</strong>
+                        <small>per second; excluded from CU math</small>
+                    </article>
+                    <article className="metric-card">
+                        <span>{isChannel ? 'Value per settlement' : 'Average transaction value'}</span>
+                        <strong>{formatUsd(isChannel ? valuePerSettlementUsd : demand.averageTransactionValueUsd)}</strong>
+                        <small>
+                            {isChannel ? `${formatCompact(requestsPerSettlement, 2)} requests amortized` : 'per transfer'}
+                        </small>
+                    </article>
+                    <article className="metric-card">
+                        <span>Network fees</span>
+                        <strong>{formatUsd(networkFeeUsdPerSecond * SECONDS_PER_DAY)}</strong>
+                        <small>per day · {formatUsd(networkFeeUsdPerSecond * SECONDS_PER_MONTH)} / month</small>
+                    </article>
+                    <article className="metric-card">
+                        <span>Fee take-rate</span>
+                        <strong>{formatTakeRate(feeTakeRateBps)}</strong>
+                        <small>network's cut of gross value</small>
+                    </article>
+                    <article className="metric-card">
+                        <span>Refundable rent capital</span>
+                        <strong>{formatUsd(rentWorkingCapitalUsd)}</strong>
+                        <small>{formatCompact(rentWorkingCapital, 2)} SOL across {formatCompact(liveChannels, 2)} channels</small>
+                    </article>
+                    <article className="metric-card">
+                        <span>Escrow float</span>
+                        <strong>{formatUsd(escrowFloatUsd)}</strong>
+                        <small>value in flight per settlement window</small>
+                    </article>
+                    <article className="metric-card">
+                        <span>Capital carrying cost</span>
+                        <strong>{formatUsd(capitalCarryingCostUsdPerYear)}</strong>
+                        <small>per year on {formatUsd(workingCapitalUsd)} tied up</small>
+                    </article>
+                    <article className="metric-card">
+                        <span>All-in operating cost</span>
+                        <strong>{formatUsd(totalOpexUsdPerYear)}</strong>
+                        <small>per year · {formatTakeRate(allInTakeRateBps)} all-in</small>
+                    </article>
+                </section>
+                <p className="opex-note">
+                    Fees assume {signaturesPerTransaction} signature{signaturesPerTransaction === 1 ? '' : 's'}/tx at{' '}
+                    {formatInteger(BASE_FEE_LAMPORTS_PER_SIGNATURE)} lamports each
+                    {demand.priorityFeeLamportsPerTx > 0
+                        ? ` + ${formatInteger(demand.priorityFeeLamportsPerTx)} lamports priority`
+                        : ''}
+                    , over {formatCompact(physicalTransactionsPerSecond, 2)} physical tx/s. Rent and escrow are refundable
+                    capital, not a burn — only their carrying cost is a true operating expense.
+                </p>
             </section>
 
             <footer>
