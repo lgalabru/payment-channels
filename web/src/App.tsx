@@ -308,7 +308,7 @@ export function App() {
         feeTakeRateBps,
         feeUsdPerYear,
         grossValuePerSecondUsd,
-        hasCheckpointScheme,
+        checkpointingAvailable,
         liveChannels,
         logicalRequestsPerSecond,
         maximumPaymentsPerSecond,
@@ -931,7 +931,7 @@ export function App() {
                                     step={1}
                                     value={inputs.reclaimBatchSize}
                                 />
-                                {hasCheckpointScheme && (
+                                {checkpointingAvailable && (
                                     <>
                                         <SelectKnob
                                             help="Cadence of interim enforceability settles between cash sweeps. Disabled = no extra checkpoints."
@@ -1423,8 +1423,8 @@ export function App() {
                         <span className="batch-explainer-label">Available today</span>
                         <strong>One channel per checkpoint</strong>
                         <p>
-                            Client-signed x402 vouchers pack a small number of [verify, settle] pairs in a transaction:
-                            five today, or 16 with a proposed 4 kB transaction limit.
+                            Plain v1 can settle one client-signed voucher per transaction. The ordinary settle path is
+                            available today; multi-channel settlement batching is not.
                         </p>
                     </div>
                     <div>

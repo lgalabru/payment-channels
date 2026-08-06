@@ -57,8 +57,8 @@ test('preset toggle sequence is atomic and objectives do not silently change the
     assert.equal(state.preset?.cheapest, false);
     assert.equal(state.preset?.fastest, true);
     assert.equal(state.inputs.scheme, 'none');
-    assert.equal(state.inputs.checkpointClockSeconds, 0);
-    assert.equal(result.enforceableFinalitySeconds, state.demand.settlementClockSeconds);
+    assert.ok(state.inputs.checkpointClockSeconds > 0);
+    assert.ok(result.enforceableFinalitySeconds < state.demand.settlementClockSeconds);
 });
 
 test('manual edits clear the preset in the same transition', () => {

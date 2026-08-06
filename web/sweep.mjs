@@ -1,72 +1,40 @@
-import {
-    DEFAULT_DEMAND,
-    MPP_CHECKPOINT_DEFAULT_BATCH,
-    TODAY,
-    X402_CHECKPOINT_DEFAULT_BATCH,
-    evaluateModel,
-    resolvePresetShape,
-} from './src/model.ts';
+import { DEFAULT_PRESET_SELECTION, resolvePresetScenario } from './src/app-state.ts';
+import { DEFAULT_DEMAND, evaluateModel, TODAY } from './src/model.ts';
 
 const SCALES = {
     '1M': 1_000_000,
     '10M': 10_000_000,
 };
 
-function horizonInputs(horizon, users) {
-    if (horizon === 'today') {
-        return {
-            ...TODAY,
-            batchSettlementAvailable: false,
-            checkpointBatchSize: 1,
-            mode: 'channel-v1',
-            scheme: 'x402',
-            voucherVerifyPerSecond: users,
-        };
-    }
-
-    return {
-        ...TODAY,
-        batchSettlementAvailable: true,
-        checkpointBatchSize: MPP_CHECKPOINT_DEFAULT_BATCH,
-        largeTx: true,
-        mode: 'channel-v2',
-        openCostUnits: 17_300,
-        scheme: 'mpp',
-        voucherSigFeeRemoved: true,
-    };
+function scenario(scale, horizon, cheapest, fastest) {
+    return resolvePresetScenario(TODAY, DEFAULT_DEMAND, { cheapest, fastest, horizon, scale });
 }
 
-function demandFor(users) {
-    return {
-        ...DEFAULT_DEMAND,
-        averageRequestsPerMinutePerUser: 60,
-        channelLifetimeSeconds: 604_800,
-        users,
-    };
+function line(label, state) {
+    const result = evaluateModel(state.inputs, state.demand);
+    return `${label.padEnd(9)} cash=${String(state.demand.settlementClockSeconds).padStart(5)}s checkpoint=${String(state.inputs.checkpointClockSeconds).padStart(5)}s finality=${String(result.settlementLatencySeconds.toFixed(0)).padStart(5)}s budget=${result.budgetSharePercent.toFixed(1).padStart(5)}% all-in=${result.allInTakeRateBps.toFixed(3)}bps opex=$${(result.totalOpexUsdPerYear / 1e6).toFixed(2)}M`;
 }
 
-function line(label, shape) {
-    const result = shape.result;
-    return `${label.padEnd(9)} cash=${String(shape.settlementClockSeconds).padStart(5)}s checkpoint=${String(shape.checkpointClockSeconds).padStart(5)}s finality=${String(result.settlementLatencySeconds.toFixed(0)).padStart(5)}s budget=${result.budgetSharePercent.toFixed(1).padStart(5)}% all-in=${result.allInTakeRateBps.toFixed(3)}bps opex=$${(result.totalOpexUsdPerYear / 1e6).toFixed(2)}M`;
-}
-
-for (const [scale, users] of Object.entries(SCALES)) {
+for (const scale of Object.keys(SCALES)) {
     for (const horizon of ['today', 'longterm']) {
-        const inputs = horizonInputs(horizon, users);
-        const demand = demandFor(users);
         console.log(`\n### ${scale} | ${horizon}`);
-        console.log(line('neither', resolvePresetShape(inputs, demand, { cheapest: false, fastest: false })));
-        console.log(line('cheapest', resolvePresetShape(inputs, demand, { cheapest: true, fastest: false })));
-        console.log(line('fastest', resolvePresetShape(inputs, demand, { cheapest: false, fastest: true })));
-        console.log(line('both', resolvePresetShape(inputs, demand, { cheapest: true, fastest: true })));
+        console.log(line('neither', scenario(scale, horizon, false, false)));
+        console.log(line('cheapest', scenario(scale, horizon, true, false)));
+        console.log(line('fastest', scenario(scale, horizon, false, true)));
+        console.log(line('both', scenario(scale, horizon, true, true)));
     }
 }
 
 console.log('\n=== Same-base MPP vs x402 ===');
 for (const [scale, users] of Object.entries(SCALES)) {
-    const demand = { ...demandFor(users), settlementClockSeconds: 3_600 };
+    const longterm = resolvePresetScenario(TODAY, DEFAULT_DEMAND, {
+        ...DEFAULT_PRESET_SELECTION,
+        horizon: 'longterm',
+        scale,
+    });
+    const demand = { ...longterm.demand, settlementClockSeconds: 3_600 };
     const base = {
-        ...horizonInputs('longterm', users),
+        ...longterm.inputs,
         checkpointClockSeconds: 0,
         voucherSigFeeRemoved: false,
     };

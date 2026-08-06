@@ -22,6 +22,7 @@ const closeTo = (actual: number, expected: number, tolerance = 1e-6) => {
 };
 
 test('checkpoint fits reproduce the finalized mainnet settle sample', () => {
+    closeTo(checkpointCostPerChannel('none', 1), 4_209);
     closeTo(checkpointCostPerChannel('x402', 1), 4_209);
     closeTo(checkpointCostPerChannel('x402', 5), 3_374.6);
     closeTo(checkpointCostPerChannel('mpp', 59), 947.9661016949153);

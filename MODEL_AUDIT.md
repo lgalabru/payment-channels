@@ -111,13 +111,14 @@ state queues. The transition matrix is covered directly, including Cheapest on/o
 
 Batch settlement is also an explicit horizon capability. The Today rail forces one checkpoint channel per
 transaction in the evaluator itself; disabling the slider is only a presentation detail. Proposed ADR-004
-batching is enabled only on the Long-term rail.
+batching is enabled only on the Long-term rail. Plain v1 can still advance its watermark with an ordinary
+client-signed settle, independently of whether x402 is selected.
 
 The 10M combined presets now resolve differently:
 
 | Horizon                               | Cash clock | Checkpoint | Finality | Budget |    All-in |
 | ------------------------------------- | ---------: | ---------: | -------: | -----: | --------: |
-| Available today (v1 + x402)           |         1h |   disabled |       1h |  64.0% | 0.184 bps |
+| Available today (plain v1)            |         1h |   disabled |       1h |  64.0% | 0.184 bps |
 | Long-term (v2 + MPP + selected SIMDs) |         1h |        30m |      30m |  67.2% | 0.159 bps |
 
 At 10M/today, the discrete Pareto frontier has no interior candidate between the one-hour neutral/cheapest cash

@@ -206,7 +206,8 @@ function simdParamsFor(ids: readonly string[]): SimdParams {
     );
 }
 
-function resolvePresetScenario(
+/** Resolve one complete preset through the same inputs and optimizer used by the UI reducer. */
+export function resolvePresetScenario(
     baseInputs: ModelInputs,
     baseDemand: DemandInputs,
     selection: PresetSelection,

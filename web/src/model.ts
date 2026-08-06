@@ -59,7 +59,7 @@ export interface ModelResult {
     feeTakeRateBps: number;
     feeUsdPerYear: number;
     grossValuePerSecondUsd: number;
-    hasCheckpointScheme: boolean;
+    checkpointingAvailable: boolean;
     intermediateBoundariesPerChannel: number;
     liveChannels: number;
     logicalRequestsPerSecond: number;
@@ -184,10 +184,6 @@ export function requiresPerPaymentVerify(mode: ModelMode, scheme: SettlementSche
     return mode !== 'vanilla' && scheme !== 'mpp';
 }
 
-export function schemeHasCheckpoints(scheme: SettlementScheme): boolean {
-    return scheme !== 'none';
-}
-
 export function checkpointMaxBatch(scheme: SettlementScheme, largeTx: boolean, voucherSigFeeRemoved = false): number {
     if (scheme === 'mpp') return largeTx ? MPP_CHECKPOINT_LARGE_TX_MAX_BATCH : MPP_CHECKPOINT_MAX_BATCH;
     if (largeTx) {
@@ -211,9 +207,10 @@ export function effectiveCheckpointBatchSize(inputs: ModelInputs): number {
 
 export function checkpointCostPerChannel(scheme: SettlementScheme, batchSize: number): number {
     const n = Math.max(1, batchSize);
-    if (scheme === 'x402') return 3_166 + 1_043 / n;
     if (scheme === 'mpp') return 890 + 3_420 / n;
-    return 0;
+    // Plain v1 and x402 both settle client-signed vouchers on-chain. x402 changes the
+    // transport, not the deployed settle instruction or its scheduler cost.
+    return 3_166 + 1_043 / n;
 }
 
 export function reclaimCostPerChannel(batchSize: number): number {
@@ -227,7 +224,7 @@ function terminalVoucherFeeLamports(voucherSigFeeRemoved: boolean): number {
 
 function checkpointFeeLamportsPerTransaction(inputs: ModelInputs, batchSize: number): number {
     if (inputs.voucherSigFeeRemoved) return BASE_FEE_LAMPORTS_PER_SIGNATURE;
-    const voucherSignatures = inputs.scheme === 'x402' ? batchSize : 1;
+    const voucherSignatures = inputs.scheme === 'mpp' ? 1 : batchSize;
     return BASE_FEE_LAMPORTS_PER_SIGNATURE * (1 + voucherSignatures);
 }
 
@@ -287,8 +284,8 @@ export function evaluateModel(inputs: ModelInputs, demand: DemandInputs): ModelR
               : 0;
     const cashBoundaryCostUnitsPerSecond = cashBoundariesPerSecond * cashBoundaryCostUnits;
 
-    const hasCheckpointScheme = isChannel && schemeHasCheckpoints(inputs.scheme);
-    const checkpointsEnabled = hasCheckpointScheme && inputs.checkpointClockSeconds > 0;
+    const checkpointingAvailable = isChannel;
+    const checkpointsEnabled = checkpointingAvailable && inputs.checkpointClockSeconds > 0;
     const checkpointBatchSize = effectiveCheckpointBatchSize(inputs);
     const checkpointChannels = liveChannels;
     const finalizingBoundarySeconds = settlementClockEnabled ? demand.settlementClockSeconds : channelLifeSeconds;
@@ -438,6 +435,7 @@ export function evaluateModel(inputs: ModelInputs, demand: DemandInputs): ModelR
         checkpointCostPerChannelUnits,
         checkpointCostUnitsPerSecond,
         checkpointTransactionsPerSecond,
+        checkpointingAvailable,
         checkpointsEnabled,
         checkpointsPerSecond,
         costPerLifecycle,
@@ -448,7 +446,6 @@ export function evaluateModel(inputs: ModelInputs, demand: DemandInputs): ModelR
         feeTakeRateBps,
         feeUsdPerYear,
         grossValuePerSecondUsd,
-        hasCheckpointScheme,
         intermediateBoundariesPerChannel,
         liveChannels,
         logicalRequestsPerSecond,
