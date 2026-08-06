@@ -164,9 +164,108 @@ h1 {
 
 .timeline-panel .section-heading,
 .timeline-panel .phase-summary,
-.timeline-panel .timeline {
+.timeline-panel .timeline,
+.timeline-panel .simd-grid {
     position: relative;
     z-index: 1;
+}
+
+/* Timeline as stackable SIMD checkboxes (non-exclusive). */
+.simd-grid {
+    display: grid;
+    gap: 8px;
+    grid-template-columns: repeat(auto-fill, minmax(228px, 1fr));
+    margin-bottom: 14px;
+}
+
+.simd-card {
+    background: rgba(17, 17, 17, 0.72);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    cursor: pointer;
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    padding: 12px 13px;
+    transition: border-color 0.12s ease, background 0.12s ease;
+}
+
+.simd-card:hover {
+    border-color: var(--border-strong);
+}
+
+.simd-card.simd-on {
+    background: var(--accent-dim);
+    border-color: var(--accent);
+}
+
+.simd-card.simd-warn.simd-on {
+    border-color: var(--danger);
+}
+
+.simd-card-top {
+    align-items: center;
+    display: flex;
+    gap: 8px;
+}
+
+.simd-card-top input {
+    accent-color: var(--accent);
+    height: 15px;
+    margin: 0;
+    width: 15px;
+}
+
+.simd-code {
+    color: var(--muted);
+    font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
+    font-size: 0.7rem;
+    font-variant-numeric: tabular-nums;
+}
+
+.simd-status {
+    border: 1px solid var(--border-strong);
+    border-radius: 999px;
+    color: var(--muted);
+    font-size: 0.6rem;
+    letter-spacing: 0.04em;
+    margin-left: auto;
+    padding: 1px 7px;
+    text-transform: uppercase;
+}
+
+.simd-card > strong {
+    align-items: center;
+    display: flex;
+    font-size: 0.92rem;
+    gap: 8px;
+}
+
+.simd-card.simd-on > strong {
+    color: var(--accent);
+}
+
+.simd-tag {
+    border: 1px solid var(--border-strong);
+    border-radius: 4px;
+    color: var(--muted);
+    font-size: 0.6rem;
+    font-weight: 500;
+    letter-spacing: 0.03em;
+    padding: 1px 6px;
+    text-transform: uppercase;
+}
+
+.simd-moves {
+    color: var(--muted);
+    font-size: 0.68rem;
+    text-transform: uppercase;
+}
+
+.simd-card small {
+    color: var(--muted);
+    font-size: 0.74rem;
+    line-height: 1.4;
 }
 
 .section-heading,
@@ -684,6 +783,49 @@ input[type='range'] {
 
 .progress-mode-switch small {
     color: var(--muted);
+}
+
+/* Two-tier settlement stack: base rail + optional settlement scheme, side by side with a horizontal gap. */
+.settlement-stack {
+    align-items: stretch;
+    display: flex;
+    gap: 20px;
+    margin-bottom: 24px;
+}
+
+.settlement-stack .mode-switch {
+    margin-bottom: 0;
+}
+
+.settlement-stack .stack-base {
+    flex: 3;
+    grid-template-columns: repeat(3, 1fr);
+}
+
+.settlement-stack .stack-scheme {
+    flex: 2;
+    grid-template-columns: repeat(2, 1fr);
+    position: relative;
+}
+
+.stack-scheme.stack-scheme-disabled {
+    opacity: 0.4;
+}
+
+.stack-scheme button:disabled {
+    cursor: not-allowed;
+}
+
+.stack-scheme small strong {
+    color: inherit;
+    font-weight: 700;
+}
+
+@media (max-width: 720px) {
+    .settlement-stack {
+        flex-direction: column;
+        gap: 10px;
+    }
 }
 
 .progress-number {
@@ -1331,6 +1473,95 @@ footer p {
 @media (max-width: 460px) {
     .metrics-grid {
         grid-template-columns: 1fr;
+    }
+}
+
+/* Condensed operating-economics summary, pinned to the viewport bottom so param changes stay visible. */
+.opex-sticky {
+    align-items: center;
+    backdrop-filter: blur(8px);
+    background: rgba(20, 20, 20, 0.92);
+    border: 1px solid var(--border-strong);
+    border-radius: 10px;
+    bottom: 12px;
+    box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px 22px;
+    margin-bottom: 16px;
+    padding: 12px 18px;
+    position: sticky;
+    z-index: 20;
+}
+
+.opex-sticky-rail {
+    align-items: center;
+    display: flex;
+    gap: 10px;
+}
+
+.opex-sticky-eyebrow {
+    color: var(--accent);
+    font-size: 0.62rem;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+}
+
+.opex-sticky-label {
+    font-size: 0.9rem;
+    font-weight: 700;
+}
+
+.opex-sticky-verdict {
+    border: 1px solid var(--border-strong);
+    border-radius: 999px;
+    font-size: 0.72rem;
+    font-variant-numeric: tabular-nums;
+    padding: 2px 10px;
+}
+
+.opex-sticky-verdict.pass {
+    background: rgba(184, 232, 199, 0.12);
+    border-color: var(--success);
+    color: var(--success);
+}
+
+.opex-sticky-verdict.over {
+    background: rgba(255, 176, 155, 0.1);
+    border-color: var(--danger);
+    color: var(--danger);
+}
+
+.opex-sticky-metrics {
+    display: flex;
+    flex: 1;
+    flex-wrap: wrap;
+    gap: 10px 22px;
+    justify-content: flex-end;
+}
+
+.opex-sticky-metrics > div {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+}
+
+.opex-sticky-metrics span {
+    color: var(--muted);
+    font-size: 0.62rem;
+    letter-spacing: 0.03em;
+    text-transform: uppercase;
+}
+
+.opex-sticky-metrics strong {
+    font-size: 0.9rem;
+    font-variant-numeric: tabular-nums;
+}
+
+@media (max-width: 720px) {
+    .opex-sticky-metrics {
+        justify-content: flex-start;
     }
 }
 

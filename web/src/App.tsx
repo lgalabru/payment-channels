@@ -11,10 +11,18 @@ interface ModelInputs {
     checkpointClockSeconds: number;
     // Channel-settles packed into one checkpoint tx (n in the per-mode fit). Only read for checkpoint modes.
     checkpointBatchSize: number;
+    // Cost of the `open` instruction in CU. SIMD-0567 (p-ATA) cuts this from 36,086 to ~17,300; feeds the
+    // v1 lifecycle and the v2 amortized open. Extracted as an input so timeline SIMDs can move it.
+    openCostUnits: number;
     mode: ModelMode;
     reclaimBatchSize: number;
     rentPerChannelSol: number;
     slotMs: number;
+    // SIMD-0568 (precompile removal): drops the ed25519 signature fee on voucher-bearing settles, so a
+    // channel settle tx pays one base signature instead of two.
+    voucherSigFeeRemoved: boolean;
+    // SIMD-0296 / 0385 (4kB transactions): raises checkpoint packing — x402 5 → 16/tx, ADR-004 59 → 60.
+    largeTx: boolean;
     transferCostUnits: number;
     transferKind: TransferKind;
     voucherVerifyPerSecond: number;
@@ -29,17 +37,6 @@ interface DemandInputs {
     settlementClockSeconds: number;
     solPriceUsd: number;
     users: number;
-}
-
-type TimelineInputs = Pick<ModelInputs, 'availableCapacityPercent' | 'blockCostUnits' | 'rentPerChannelSol' | 'slotMs'>;
-
-interface Phase {
-    readonly date: string;
-    readonly description: string;
-    readonly id: string;
-    readonly inputs: TimelineInputs;
-    readonly label: string;
-    readonly status: 'Expected' | 'Live' | 'Target';
 }
 
 interface RangeKnobProps {
@@ -94,7 +91,9 @@ const SESSION_BOUNDARY_V2_COST_UNITS = REARM_COST_UNITS + TOP_UP_COST_UNITS; // 
 // 1 batched reclaim. This makes v2(K=1) == v1 exactly (zero re-arms occur) and v2 strictly cheaper for
 // K>1. Corrects the earlier flat 58,134/K form, which double-charged the last session for both a re-arm
 // and a terminal close (v2 read worse than v1 at K=1). See PR #81 commit d58ad41 and lifecycleCost().
-const V2_OPEN_COST_UNITS = 36_086;
+const V2_OPEN_COST_UNITS = 36_086; // baseline `open` cost (default ModelInputs.openCostUnits)
+// v1 lifecycle with the `open` instruction factored out, so timeline SIMDs can move open independently.
+const V1_LIFECYCLE_EX_OPEN_COST_UNITS = V1_LIFECYCLE_COST_UNITS - V2_OPEN_COST_UNITS; // 25,536
 const V2_TERMINAL_CLOSE_COST_UNITS = 23_875; // final settle_and_seal + distribute, carries the last voucher
 // Enforceability checkpoints (x402-batch / mpp-operator only). An interim settle that advances the
 // on-chain watermark so accumulated voucher value becomes claimable BETWEEN cash-sweep boundaries —
@@ -104,9 +103,11 @@ const V2_TERMINAL_CLOSE_COST_UNITS = 23_875; // final settle_and_seal + distribu
 // at n ≤ 5 in a 1,232-byte tx (~16 under a 4kB tx). mpp-operator: one operator holds authorizedSigner
 // across the fleet, so ADR-004 batches DISTINCT customers into one signed commitment, account-bound at
 // n ≤ 59. Per-channel fits from MODES_MPP_X402.md (toly, 2026-08-06).
-const X402_CHECKPOINT_MAX_BATCH = 16; // 4kB tx; 5 today under the 1,232-byte limit
+const X402_CHECKPOINT_TODAY_MAX_BATCH = 5; // 1,232-byte tx limit today
+const X402_CHECKPOINT_MAX_BATCH = 16; // under 4kB transactions (SIMD-0296 / 0385)
 const X402_CHECKPOINT_DEFAULT_BATCH = 5;
 const MPP_CHECKPOINT_MAX_BATCH = 59; // 64-account tx cap, ADR-004
+const MPP_CHECKPOINT_LARGETX_MAX_BATCH = 60; // ADR-004 59 → 60 under 4kB transactions
 const MPP_CHECKPOINT_DEFAULT_BATCH = 59;
 const USER_STEPS = [0, 1, 10, 100, 1_000, 10_000, 100_000, 1_000_000, 10_000_000, 100_000_000] as const;
 const SETTLEMENT_CLOCK_OPTIONS = [
@@ -159,73 +160,157 @@ const TODAY: ModelInputs = {
     blockCostUnits: 100_000_000,
     checkpointBatchSize: X402_CHECKPOINT_DEFAULT_BATCH,
     checkpointClockSeconds: 60,
+    largeTx: false,
     mode: 'channel-v1',
+    openCostUnits: V2_OPEN_COST_UNITS,
     reclaimBatchSize: 8,
     rentPerChannelSol: 0.00471192,
     slotMs: 400,
     transferCostUnits: SPL_TOKEN_TRANSFER_COST_UNITS,
     transferKind: 'spl-token',
+    voucherSigFeeRemoved: false,
     voucherVerifyPerSecond: 1_000_000,
 };
 
-const PHASES: readonly Phase[] = [
+// Timeline as non-exclusive, stackable SIMDs. Each toggle applies its own delta to the SIMD-controlled
+// subset of ModelInputs, so multiple upgrades compose. Deltas track SIMD_WATCH.md (toly, 2026-08-06).
+// Applied in array order — rent ÷2 before rent ÷10 (÷10 supersedes), p-ATA before Alpenglow (bumps stack).
+type SimdParams = Pick<
+    ModelInputs,
+    'availableCapacityPercent' | 'blockCostUnits' | 'slotMs' | 'rentPerChannelSol' | 'openCostUnits' | 'voucherSigFeeRemoved' | 'largeTx'
+>;
+const BASELINE_RENT_SOL = 0.00471192;
+const BASELINE_SIMD_PARAMS: SimdParams = {
+    availableCapacityPercent: 50,
+    blockCostUnits: 100_000_000,
+    largeTx: false,
+    openCostUnits: V2_OPEN_COST_UNITS,
+    rentPerChannelSol: BASELINE_RENT_SOL,
+    slotMs: 400,
+    voucherSigFeeRemoved: false,
+};
+
+interface Simd {
+    readonly id: string;
+    readonly code: string;
+    readonly label: string;
+    readonly est: string;
+    readonly status: string;
+    readonly moves: string;
+    readonly note: string;
+    readonly cuNeutral?: boolean;
+    readonly warn?: boolean;
+    readonly apply: (params: SimdParams) => SimdParams;
+}
+
+const SIMDS: readonly Simd[] = [
     {
-        date: 'Apr 2026',
-        description: 'P-token cuts TransferChecked execution from 6,200 to 105 program CUs.',
-        id: 'p-token',
-        inputs: {
-            availableCapacityPercent: 50,
-            blockCostUnits: 100_000_000,
-            rentPerChannelSol: 0.00471192,
-            slotMs: 400,
-        },
-        label: 'P-token',
-        status: 'Live',
+        apply: params => ({
+            ...params,
+            availableCapacityPercent: Math.min(100, params.availableCapacityPercent * 1.1),
+            openCostUnits: 17_300,
+        }),
+        code: 'SIMD-0567',
+        est: '~mid-2027',
+        id: 'p-ata',
+        label: 'p-ATA',
+        moves: 'open cost · availability',
+        note: 'Pinocchio ATA rewrite at the same address: Create 22,940 → 4,171 CU, so open drops 36,086 → ~17,300 and v1 lifecycle ~−31%. Projects ~10% cluster-wide CU headroom (availability ticks up). The one filed proposal that moves this page’s verdicts.',
+        status: 'Review',
     },
     {
-        date: 'Aug 5',
-        description: 'Measured v1 lifecycle on 100M-unit blocks.',
-        id: 'today',
-        inputs: {
-            availableCapacityPercent: 50,
-            blockCostUnits: 100_000_000,
-            rentPerChannelSol: 0.00471192,
-            slotMs: 400,
-        },
-        label: 'Today',
-        status: 'Live',
+        apply: params => ({ ...params, voucherSigFeeRemoved: true }),
+        code: 'SIMD-0568',
+        est: 'after 0565 + migration',
+        id: 'precompile',
+        label: 'Precompile removal',
+        moves: 'fees · packing',
+        note: 'Removes the ed25519 precompile: the voucher-settle signature fee halves (10,000 → 5,000 lamports/settle) and the 162-byte ed25519 instruction leaves every settle (naive packing ~2×). ⚠ Mandatory program migration to in-program verify — the only item here that can break the deployed program, not just improve it.',
+        status: 'Review',
+        warn: true,
     },
     {
-        date: 'Q3 2026',
-        description:
-            'Slots fall to 200ms with 50M-CU blocks (Agave slot_params) — CU/s is preserved at ~250M, not doubled. Block limit stays editable.',
+        apply: params => ({ ...params, rentPerChannelSol: BASELINE_RENT_SOL * 0.5 }),
+        code: 'SIMD-0436',
+        est: 'first realistic step',
+        id: 'rent-half',
+        label: 'Rent ÷2',
+        moves: 'float',
+        note: 'lamports_per_byte 6,960 → 3,480: rent per channel 0.00471 → 0.00236 SOL. The realistic near-term rent step.',
+        status: 'Idea',
+    },
+    {
+        apply: params => ({ ...params, rentPerChannelSol: BASELINE_RENT_SOL * 0.1 }),
+        code: 'SIMD-0437',
+        est: 'aspirational end-state',
+        id: 'rent-tenth',
+        label: 'Rent ÷10',
+        moves: 'float',
+        note: 'Incremental path to ÷10: rent per channel → 0.000471 SOL. Aspirational — 0392/0438 contemplate rent going up, so don’t treat ÷10 as destiny. Supersedes ÷2 when both are on.',
+        status: 'Idea',
+    },
+    {
+        apply: params => ({ ...params, largeTx: true }),
+        code: 'SIMD-0296 / 0385',
+        est: 'Q3 2026 target',
+        id: 'large-tx',
+        label: '4kB transactions',
+        moves: 'packing',
+        note: 'Raw 4kB txs over QUIC / Transaction V1: x402 checkpoint packing 5 → 16/tx; ADR-004 59 → 60 (account-bound). A packing multiplier, not a CU/s multiplier — gates the x402 batch knob so the today-preset can’t claim Q3 packing.',
+        status: 'Review',
+    },
+    {
+        apply: params => ({ ...params, blockCostUnits: 50_000_000, slotMs: 200 }),
+        code: 'SIMD-0525',
+        cuNeutral: true,
+        est: 'phased',
         id: '200ms-slots',
-        inputs: {
-            availableCapacityPercent: 50,
-            blockCostUnits: 50_000_000,
-            rentPerChannelSol: 0.000471192,
-            slotMs: 200,
-        },
         label: '200ms slots',
-        status: 'Target',
+        moves: 'latency only',
+        note: 'Slots 400 → 200ms with 50M-CU blocks (Agave slot_params). CU/s is preserved at ~250M, not doubled — a latency phase, no capacity credit.',
+        status: 'Draft',
+    },
+    {
+        apply: params => ({ ...params, availableCapacityPercent: Math.min(100, params.availableCapacityPercent + 2) }),
+        code: 'SIMD-0326',
+        est: 'Agave 4.3 target',
+        id: 'alpenglow',
+        label: 'Alpenglow',
+        moves: 'latency · small availability',
+        note: '~150ms finality; vote transactions leave the blocks (low-single-digit % of block CUs). A latency/finality phase with a small availability bump, not a capacity multiplier.',
+        status: 'Review',
     },
 ];
 
 const MODE_LABELS: Readonly<Record<ModelMode, string>> = {
     'channel-v1': 'Payment channel v1',
-    'channel-v2': 'Payment channel v2 (ADR-005 re-arm)',
+    'channel-v2': 'Payment channel v2',
     'mpp-operator': 'MPP voucher (operator-signed)',
     vanilla: 'Vanilla transfer',
     'x402-batch': 'x402 batch settlement',
 };
-const MODE_SUBTITLES: Readonly<Record<ModelMode, string>> = {
-    'channel-v1': 'open + close every session',
-    'channel-v2': 'persistent channel, re-arm per session',
-    'mpp-operator': 'operator-signed — no per-payment verify',
-    vanilla: 'one on-chain tx / payment',
-    'x402-batch': 'client-signed vouchers, batched',
-};
-const MODE_ORDER: readonly ModelMode[] = ['vanilla', 'channel-v1', 'channel-v2', 'x402-batch', 'mpp-operator'];
+
+// The settlement selector is a two-tier "stack": a base rail (vanilla / channel v1 / channel v2) and,
+// for channels, an optional settlement scheme (x402 client-signed batch, or MPP operator-signed sessions).
+// The scheme is the OFF-CHAIN voucher plane; x402-batch and mpp-operator are both modeled on the persistent
+// (v2) channel, so choosing a scheme resolves the effective mode onto the v2 base.
+type BaseMethod = 'vanilla' | 'v1' | 'v2';
+type SettlementScheme = 'none' | 'x402' | 'mpp';
+const BASE_METHODS: readonly { id: BaseMethod; label: string; sub: string }[] = [
+    { id: 'vanilla', label: 'Vanilla transfer', sub: 'one on-chain tx / payment' },
+    { id: 'v1', label: 'Payment channel v1', sub: 'open + close every session' },
+    { id: 'v2', label: 'Payment channel v2', sub: 'persistent channel, re-arm per session' },
+];
+function baseMethodOf(mode: ModelMode): BaseMethod {
+    if (mode === 'vanilla') return 'vanilla';
+    if (mode === 'channel-v1') return 'v1';
+    return 'v2'; // channel-v2, x402-batch, mpp-operator all settle on the persistent v2 channel
+}
+function schemeOf(mode: ModelMode): SettlementScheme {
+    if (mode === 'x402-batch') return 'x402';
+    if (mode === 'mpp-operator') return 'mpp';
+    return 'none';
+}
 
 // x402 batch and MPP operator-signed both settle on-chain like v2 (persistent channel, ADR-005 re-arm);
 // they differ only in the OFF-CHAIN voucher plane, below.
@@ -389,9 +474,14 @@ function isCheckpointMode(mode: ModelMode): boolean {
     return mode === 'x402-batch' || mode === 'mpp-operator';
 }
 
-/** Largest number of channel-settles that pack into one checkpoint tx for the given mode. */
-function checkpointMaxBatch(mode: ModelMode): number {
-    return mode === 'mpp-operator' ? MPP_CHECKPOINT_MAX_BATCH : X402_CHECKPOINT_MAX_BATCH;
+/**
+ * Largest number of channel-settles that pack into one checkpoint tx for the given mode. x402 is size-bound
+ * (5 today, 16 under 4kB txs); mpp-operator is account-bound via ADR-004 (59, 60 under 4kB). `largeTx`
+ * reflects SIMD-0296 / 0385 being active on the timeline.
+ */
+function checkpointMaxBatch(mode: ModelMode, largeTx: boolean): number {
+    if (mode === 'mpp-operator') return largeTx ? MPP_CHECKPOINT_LARGETX_MAX_BATCH : MPP_CHECKPOINT_MAX_BATCH;
+    return largeTx ? X402_CHECKPOINT_MAX_BATCH : X402_CHECKPOINT_TODAY_MAX_BATCH;
 }
 
 /**
@@ -411,7 +501,8 @@ function lifecycleCost(inputs: ModelInputs, sessionsPerChannel: number): number 
     const reclaim = reclaimCostPerChannel(inputs.reclaimBatchSize);
     if (inputs.mode === 'channel-v1') {
         // Full teardown/rebuild every session: open + settle_and_seal+distribute + (batched) reclaim.
-        return V1_LIFECYCLE_COST_UNITS - STANDALONE_RECLAIM_COST_UNITS + reclaim;
+        // `open` is factored out so a timeline SIMD (p-ATA) can move it independently of the rest.
+        return V1_LIFECYCLE_EX_OPEN_COST_UNITS + inputs.openCostUnits - STANDALONE_RECLAIM_COST_UNITS + reclaim;
     }
 
     // ADR-005: over K = sessionsPerChannel sessions the channel pays one open, (K−1) cheap rearm+top_up
@@ -421,7 +512,7 @@ function lifecycleCost(inputs: ModelInputs, sessionsPerChannel: number): number 
     // for K>1 it is strictly cheaper. Reclaim stays batch-dependent so the K=1 == v1 invariant holds for
     // every reclaim-batch value, not just the observed 8.
     const channelOnceOffOverhead =
-        V2_OPEN_COST_UNITS + V2_TERMINAL_CLOSE_COST_UNITS + reclaim - SESSION_BOUNDARY_V2_COST_UNITS;
+        inputs.openCostUnits + V2_TERMINAL_CLOSE_COST_UNITS + reclaim - SESSION_BOUNDARY_V2_COST_UNITS;
     return SESSION_BOUNDARY_V2_COST_UNITS + channelOnceOffOverhead / Math.max(1, sessionsPerChannel);
 }
 
@@ -516,7 +607,7 @@ export function App() {
         return mode ? inputsForMode(TODAY, mode) : TODAY;
     });
     const [demand, setDemand] = useState<DemandInputs>(() => ({ ...DEFAULT_DEMAND, ...readSharedParams().demand }));
-    const [selectedPhaseId, setSelectedPhaseId] = useState('today');
+    const [activeSimds, setActiveSimds] = useState<readonly string[]>([]);
     const [isCustomized, setIsCustomized] = useState(false);
 
     // Mirror the four shareable knobs into the URL query so any configuration is linkable.
@@ -667,14 +758,15 @@ export function App() {
     const settlementWindowSeconds = isChannel && Number.isFinite(channelLifeSeconds) ? channelLifeSeconds : 1;
     const onChainTxPerWindow = physicalTransactionsPerSecond * settlementWindowSeconds;
     const windowDrainSeconds = settlementWindowSeconds * onChainBacklogFactor;
-    const selectedPhase = PHASES.find(phase => phase.id === selectedPhaseId) ?? PHASES[1];
 
     // Operating cost: the dollar cost of running the rail at the selected demand. None of this touches
     // the CU capacity math above — it converts the physical on-chain footprint into fees + tied-up capital.
     // Most channel transactions (open/settle/rearm/top_up) carry two signatures (payee + fee payer); vanilla
     // transfers carry one. Base fee is the fixed 5,000 lamports/signature; priority fee is a per-tx knob
     // (0 by default — realistic while blocks sit ~⅓ full, add it to model congestion pricing).
-    const signaturesPerTransaction = isChannel ? 2 : 1;
+    // Channel txs carry payee + fee-payer signatures (2); voucher-bearing settles also pay an ed25519
+    // precompile signature fee. SIMD-0568 removes that precompile, so a settle drops to a single base sig.
+    const signaturesPerTransaction = isChannel ? (inputs.voucherSigFeeRemoved ? 1 : 2) : 1;
     const networkFeeLamportsPerSecond =
         physicalTransactionsPerSecond *
         (signaturesPerTransaction * BASE_FEE_LAMPORTS_PER_SIGNATURE + demand.priorityFeeLamportsPerTx);
@@ -735,9 +827,23 @@ export function App() {
         });
     };
 
-    const selectPhase = (phase: Phase) => {
-        setInputs(previous => ({ ...previous, ...phase.inputs }));
-        setSelectedPhaseId(phase.id);
+    // Toggle a timeline SIMD, then recompute the SIMD-controlled inputs from baseline by stacking every
+    // active SIMD's delta in array order. Non-SIMD fields (mode, checkpoint cadence, reclaim batch, etc.)
+    // are preserved; the checkpoint batch is clamped to whatever the new packing regime allows.
+    const toggleSimd = (id: string) => {
+        const next = activeSimds.includes(id) ? activeSimds.filter(other => other !== id) : [...activeSimds, id];
+        const params = SIMDS.reduce<SimdParams>(
+            (accumulated, simd) => (next.includes(simd.id) ? simd.apply(accumulated) : accumulated),
+            { ...BASELINE_SIMD_PARAMS },
+        );
+        setActiveSimds(next);
+        setInputs(previous => {
+            const merged = { ...previous, ...params };
+            return {
+                ...merged,
+                checkpointBatchSize: Math.min(merged.checkpointBatchSize, checkpointMaxBatch(merged.mode, merged.largeTx)),
+            };
+        });
         setIsCustomized(false);
     };
 
@@ -756,6 +862,20 @@ export function App() {
             : inputs.checkpointBatchSize;
         setInputs(previous => ({ ...previous, checkpointBatchSize, mode, transferCostUnits }));
         setIsCustomized(true);
+    };
+
+    const activeBaseMethod = baseMethodOf(inputs.mode);
+    const activeScheme = schemeOf(inputs.mode);
+
+    // Base rail: vanilla / v1 / v2. Selecting a base drops any settlement scheme (a plain rail).
+    const selectBaseMethod = (base: BaseMethod) => {
+        selectMode(base === 'vanilla' ? 'vanilla' : base === 'v1' ? 'channel-v1' : 'channel-v2');
+    };
+    // Settlement scheme: x402 (client-signed) or MPP (operator-signed). Both are v2-persistent constructs,
+    // so selecting one promotes the base to v2; clicking the active scheme again collapses back to plain v2.
+    const selectScheme = (scheme: 'x402' | 'mpp') => {
+        const target: ModelMode = scheme === 'x402' ? 'x402-batch' : 'mpp-operator';
+        selectMode(activeScheme === scheme ? 'channel-v2' : target);
     };
 
     const selectTransferKind = (transferKind: TransferKind) => {
@@ -796,33 +916,52 @@ export function App() {
                         <p className="section-index">01</p>
                         <h2 id="timeline-title">Upgrade timeline</h2>
                     </div>
-                    <p>Select a phase to load its assumptions.</p>
+                    <p>Toggle in-flight SIMDs — they stack. Each moves a specific knob below.</p>
                 </div>
-                <div className="timeline">
-                    {PHASES.map(phase => {
-                        const isSelected = phase.id === selectedPhase.id;
+                <div className="simd-grid">
+                    {SIMDS.map(simd => {
+                        const on = activeSimds.includes(simd.id);
                         return (
-                            <button
-                                aria-pressed={isSelected}
-                                className={`phase ${isSelected ? 'phase-selected' : ''}`}
-                                key={phase.id}
-                                onClick={() => selectPhase(phase)}
-                                type="button"
-                            >
-                                <span className="phase-date">{phase.date}</span>
-                                <span className="phase-dot" />
-                                <strong>{phase.label}</strong>
-                                <small>{phase.status}</small>
-                            </button>
+                            <label className={`simd-card ${on ? 'simd-on' : ''} ${simd.warn ? 'simd-warn' : ''}`} key={simd.id}>
+                                <span className="simd-card-top">
+                                    <input checked={on} onChange={() => toggleSimd(simd.id)} type="checkbox" />
+                                    <span className="simd-code">{simd.code}</span>
+                                    <span className="simd-status">{simd.status}</span>
+                                </span>
+                                <strong>
+                                    {simd.label}
+                                    {simd.cuNeutral && <span className="simd-tag">CU/s unchanged</span>}
+                                </strong>
+                                <span className="simd-moves">
+                                    {simd.moves} · {simd.est}
+                                </span>
+                                <small>{simd.note}</small>
+                            </label>
                         );
                     })}
                 </div>
                 <div className="phase-summary" aria-live="polite">
                     <div>
-                        <span>{isCustomized ? 'Custom scenario from' : 'Selected preset'}</span>
-                        <strong>{selectedPhase.label}</strong>
+                        <span>
+                            {isCustomized
+                                ? 'Custom scenario'
+                                : activeSimds.length
+                                  ? `${activeSimds.length} SIMD${activeSimds.length === 1 ? '' : 's'} stacked`
+                                  : 'Today — mainnet baseline'}
+                        </span>
+                        <strong>
+                            {activeSimds.length
+                                ? SIMDS.filter(simd => activeSimds.includes(simd.id))
+                                      .map(simd => simd.label)
+                                      .join(' + ')
+                                : 'No upgrades applied'}
+                        </strong>
                     </div>
-                    <p>{selectedPhase.description}</p>
+                    <p>
+                        No filed SIMD raises CU/s past ~250M — every gain here cuts per-operation cost, not the block
+                        ceiling. If a 150M/200M-block proposal appears it multiplies every ceiling on this page
+                        linearly; that is the number to watch the SIMD repo for.
+                    </p>
                     {isCustomized && <span className="custom-badge">Modified</span>}
                 </div>
             </section>
@@ -867,22 +1006,50 @@ export function App() {
                     />
                 </div>
                 <div className="settlement-method-heading">
-                    <strong>Settlement method</strong>
-                    <span>Choose how logical requests reach the chain.</span>
+                    <strong>Settlement stack</strong>
+                    <span>Pick a base rail, then optionally a settlement scheme on top.</span>
                 </div>
-                <div aria-label="Settlement method" className="mode-switch progress-mode-switch" role="group">
-                    {MODE_ORDER.map(mode => (
+                <div className="settlement-stack">
+                    <div aria-label="Base settlement rail" className="mode-switch progress-mode-switch stack-base" role="group">
+                        {BASE_METHODS.map(base => (
+                            <button
+                                aria-pressed={activeBaseMethod === base.id}
+                                className={activeBaseMethod === base.id ? 'active' : ''}
+                                key={base.id}
+                                onClick={() => selectBaseMethod(base.id)}
+                                type="button"
+                            >
+                                <span>{base.label}</span>
+                                <small>{base.sub}</small>
+                            </button>
+                        ))}
+                    </div>
+                    <div
+                        aria-label="Settlement scheme"
+                        className={`mode-switch progress-mode-switch stack-scheme ${activeBaseMethod === 'vanilla' ? 'stack-scheme-disabled' : ''}`}
+                        role="group"
+                    >
                         <button
-                            aria-pressed={inputs.mode === mode}
-                            className={inputs.mode === mode ? 'active' : ''}
-                            key={mode}
-                            onClick={() => selectMode(mode)}
+                            aria-pressed={activeScheme === 'x402'}
+                            className={activeScheme === 'x402' ? 'active' : ''}
+                            disabled={activeBaseMethod === 'vanilla'}
+                            onClick={() => selectScheme('x402')}
                             type="button"
                         >
-                            <span>{MODE_LABELS[mode]}</span>
-                            <small>{MODE_SUBTITLES[mode]}</small>
+                            <span>x402</span>
+                            <small>batch-settlement, client signed.</small>
                         </button>
-                    ))}
+                        <button
+                            aria-pressed={activeScheme === 'mpp'}
+                            className={activeScheme === 'mpp' ? 'active' : ''}
+                            disabled={activeBaseMethod === 'vanilla'}
+                            onClick={() => selectScheme('mpp')}
+                            type="button"
+                        >
+                            <span>MPP</span>
+                            <small><strong>sessions</strong>, operator signed</small>
+                        </button>
+                    </div>
                 </div>
                 <div className="progress-scale">
                     <span>0</span>
@@ -1198,7 +1365,7 @@ export function App() {
                                                     : 'Packed [Ed25519, settle] pairs, size-bound (5 today; ≤ 16 under a 4kB tx)'
                                             }
                                             label="Checkpoint batch (n)"
-                                            max={checkpointMaxBatch(inputs.mode)}
+                                            max={checkpointMaxBatch(inputs.mode, inputs.largeTx)}
                                             min={1}
                                             onChange={value => updateInput('checkpointBatchSize', value)}
                                             step={1}
@@ -1520,6 +1687,42 @@ export function App() {
                     capital, not a burn — only their carrying cost is a true operating expense.
                 </p>
             </section>
+
+            <div className="opex-sticky" aria-label="Operating economics — live summary">
+                <div className="opex-sticky-rail">
+                    <span className="opex-sticky-eyebrow">OpEx</span>
+                    <span className="opex-sticky-label">{MODE_LABELS[inputs.mode]}</span>
+                    <span className={`opex-sticky-verdict ${canHandleDemand ? 'pass' : 'over'}`}>
+                        {canHandleDemand
+                            ? 'fits 10M'
+                            : `${formatCompact(logicalRequestsPerSecond / Math.max(sustainableCeiling, 1), 2)}× over`}
+                    </span>
+                </div>
+                <div className="opex-sticky-metrics">
+                    <div>
+                        <span>Network fees</span>
+                        <strong>{formatUsd(networkFeeUsdPerSecond * SECONDS_PER_DAY)}/day</strong>
+                    </div>
+                    <div>
+                        <span>All-in opex</span>
+                        <strong>{formatUsd(totalOpexUsdPerYear)}/yr</strong>
+                    </div>
+                    <div>
+                        <span>All-in take-rate</span>
+                        <strong>{formatTakeRate(allInTakeRateBps)}</strong>
+                    </div>
+                    {isChannel && (
+                        <div>
+                            <span>Escrow float</span>
+                            <strong>{formatUsd(escrowFloatUsd)}</strong>
+                        </div>
+                    )}
+                    <div>
+                        <span>On-chain budget</span>
+                        <strong>{formatPercent(budgetSharePercent)}</strong>
+                    </div>
+                </div>
+            </div>
 
             <footer>
                 <p>
