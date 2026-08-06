@@ -198,7 +198,6 @@ interface Simd {
     readonly status: string;
     readonly moves: string;
     readonly note: string;
-    readonly cuNeutral?: boolean;
     readonly warn?: boolean;
     readonly apply: (params: SimdParams) => SimdParams;
 }
@@ -230,26 +229,6 @@ const SIMDS: readonly Simd[] = [
         warn: true,
     },
     {
-        apply: params => ({ ...params, rentPerChannelSol: BASELINE_RENT_SOL * 0.5 }),
-        code: 'SIMD-0436',
-        est: 'first realistic step',
-        id: 'rent-half',
-        label: 'Rent ÷2',
-        moves: 'float',
-        note: 'lamports_per_byte 6,960 → 3,480: rent per channel 0.00471 → 0.00236 SOL. The realistic near-term rent step.',
-        status: 'Idea',
-    },
-    {
-        apply: params => ({ ...params, rentPerChannelSol: BASELINE_RENT_SOL * 0.1 }),
-        code: 'SIMD-0437',
-        est: 'aspirational end-state',
-        id: 'rent-tenth',
-        label: 'Rent ÷10',
-        moves: 'float',
-        note: 'Incremental path to ÷10: rent per channel → 0.000471 SOL. Aspirational — 0392/0438 contemplate rent going up, so don’t treat ÷10 as destiny. Supersedes ÷2 when both are on.',
-        status: 'Idea',
-    },
-    {
         apply: params => ({ ...params, largeTx: true }),
         code: 'SIMD-0296 / 0385',
         est: 'Q3 2026 target',
@@ -258,17 +237,6 @@ const SIMDS: readonly Simd[] = [
         moves: 'packing',
         note: 'Raw 4kB txs over QUIC / Transaction V1: x402 checkpoint packing 5 → 16/tx; ADR-004 59 → 60 (account-bound). A packing multiplier, not a CU/s multiplier — gates the x402 batch knob so the today-preset can’t claim Q3 packing.',
         status: 'Review',
-    },
-    {
-        apply: params => ({ ...params, blockCostUnits: 50_000_000, slotMs: 200 }),
-        code: 'SIMD-0525',
-        cuNeutral: true,
-        est: 'phased',
-        id: '200ms-slots',
-        label: '200ms slots',
-        moves: 'latency only',
-        note: 'Slots 400 → 200ms with 50M-CU blocks (Agave slot_params). CU/s is preserved at ~250M, not doubled — a latency phase, no capacity credit.',
-        status: 'Draft',
     },
     {
         apply: params => ({ ...params, availableCapacityPercent: Math.min(100, params.availableCapacityPercent + 2) }),
@@ -916,7 +884,7 @@ export function App() {
                         <p className="section-index">01</p>
                         <h2 id="timeline-title">Upgrade timeline</h2>
                     </div>
-                    <p>Toggle in-flight SIMDs — they stack. Each moves a specific knob below.</p>
+                    <p>Toggle SIMDs currently in review — they stack. Each moves a specific knob below.</p>
                 </div>
                 <div className="simd-grid">
                     {SIMDS.map(simd => {
@@ -928,10 +896,7 @@ export function App() {
                                     <span className="simd-code">{simd.code}</span>
                                     <span className="simd-status">{simd.status}</span>
                                 </span>
-                                <strong>
-                                    {simd.label}
-                                    {simd.cuNeutral && <span className="simd-tag">CU/s unchanged</span>}
-                                </strong>
+                                <strong>{simd.label}</strong>
                                 <span className="simd-moves">
                                     {simd.moves} · {simd.est}
                                 </span>
