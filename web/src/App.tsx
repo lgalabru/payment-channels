@@ -1548,10 +1548,6 @@ export function App() {
                             </svg>
                             <span>Solana Foundation</span>
                         </div>
-                        <p>
-                            Mainnet scheduler costs: SPL Token 1,911 · Token-2022 6,536 · channel lifecycle 60,709 with
-                            reclaim batch 8. Channel v2 remains an ADR-005 planning envelope.
-                        </p>
                     </div>
                     <nav aria-label="Payment channel resources" className="site-footer-links">
                         <a href="https://pay.sh" rel="noopener noreferrer" target="_blank">

@@ -2007,8 +2007,7 @@ progress::-moz-progress-bar,
 .how-it-works-grid p,
 .batch-explainer p,
 .scaling-laws p,
-.scaling-note,
-.site-footer-brand p {
+.scaling-note {
     color: var(--muted);
     font-size: 0.82rem;
     line-height: 1.45;
@@ -2184,10 +2183,6 @@ progress::-moz-progress-bar,
     font-size: 0.75rem;
     letter-spacing: 0.08em;
     text-transform: uppercase;
-}
-
-.site-footer-brand p {
-    max-width: 640px;
 }
 
 .site-footer-tail {
