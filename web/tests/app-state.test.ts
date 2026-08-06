@@ -12,22 +12,36 @@ test('default state is the resolved 1M available-today preset', () => {
     assert.equal(state.demand.averageRequestsPerMinutePerUser, 60);
     assert.equal(state.demand.settlementClockSeconds, 300);
     assert.equal(state.inputs.mode, 'channel-v1');
-    assert.equal(state.inputs.scheme, 'x402');
+    assert.equal(state.inputs.scheme, 'none');
     assert.equal(state.inputs.batchSettlementAvailable, false);
     assert.equal(state.inputs.checkpointBatchSize, 1);
     assert.deepEqual(state.activeSimds, []);
     assert.ok(evaluateModel(state.inputs, state.demand).canHandleDemand);
 });
 
-test('the canonical default query reloads as selected while other shared URLs remain custom', () => {
-    const canonical = createInitialState('?users=1000000&rpm=60&clock=300&method=v1&scheme=x402');
+test('the canonical plain-v1 default query reloads as selected while voucher links remain custom', () => {
+    const canonical = createInitialState('?users=1000000&rpm=60&clock=300&method=v1');
+    const x402 = createInitialState('?users=1000000&rpm=60&clock=300&method=v1&scheme=x402');
     const custom = createInitialState('?users=10000000&rpm=60&clock=3600&method=v1&scheme=x402');
 
     assert.deepEqual(canonical.preset, DEFAULT_PRESET_SELECTION);
+    assert.equal(canonical.inputs.scheme, 'none');
+    assert.equal(x402.preset, null);
+    assert.equal(x402.inputs.scheme, 'x402');
     assert.equal(custom.preset, null);
 });
 
-test('preset toggle sequence is atomic and fastest does not delay the cash sweep', () => {
+test('selecting Available today clears an explicit voucher scheme', () => {
+    const sharedX402 = createInitialState('?users=1000000&rpm=60&clock=300&method=v1&scheme=x402');
+    const state = appReducer(sharedX402, { patch: { horizon: 'today' }, type: 'select-preset' });
+
+    assert.deepEqual(state.preset, DEFAULT_PRESET_SELECTION);
+    assert.equal(state.inputs.mode, 'channel-v1');
+    assert.equal(state.inputs.scheme, 'none');
+    assert.equal(state.inputs.checkpointBatchSize, 1);
+});
+
+test('preset toggle sequence is atomic and objectives do not silently change the selected rail', () => {
     let state = createInitialState();
     state = appReducer(state, { objective: 'cheapest', type: 'toggle-preset-objective' });
     assert.equal(state.demand.settlementClockSeconds, 3_600);
@@ -42,8 +56,9 @@ test('preset toggle sequence is atomic and fastest does not delay the cash sweep
     assert.equal(state.demand.settlementClockSeconds, 300);
     assert.equal(state.preset?.cheapest, false);
     assert.equal(state.preset?.fastest, true);
-    assert.ok(state.inputs.checkpointClockSeconds > 0);
-    assert.ok(result.enforceableFinalitySeconds < state.demand.settlementClockSeconds);
+    assert.equal(state.inputs.scheme, 'none');
+    assert.equal(state.inputs.checkpointClockSeconds, 0);
+    assert.equal(result.enforceableFinalitySeconds, state.demand.settlementClockSeconds);
 });
 
 test('manual edits clear the preset in the same transition', () => {
@@ -77,6 +92,7 @@ test('every preset combination is deterministic, fits, and respects its objectiv
             for (const state of [neutral, cheapest, fastest, both]) {
                 assert.equal(state.inputs.batchSettlementAvailable, horizon === 'longterm');
                 if (horizon === 'today') assert.equal(state.inputs.checkpointBatchSize, 1);
+                assert.equal(state.inputs.scheme, horizon === 'today' ? 'none' : 'mpp');
             }
 
             for (const result of [neutralResult, cheapestResult, fastestResult, bothResult]) {

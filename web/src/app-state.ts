@@ -186,7 +186,7 @@ const PRESET_RAIL: Readonly<
         mode: 'channel-v2',
         scheme: 'mpp',
     },
-    today: { batchSettlementAvailable: false, checkpointBatch: 1, mode: 'channel-v1', scheme: 'x402' },
+    today: { batchSettlementAvailable: false, checkpointBatch: 1, mode: 'channel-v1', scheme: 'none' },
 };
 
 function normalizeInputs(inputs: ModelInputs): ModelInputs {
