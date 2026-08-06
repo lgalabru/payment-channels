@@ -23,7 +23,7 @@ interface DemandInputs {
     users: number;
 }
 
-type TimelineInputs = Pick<ModelInputs, 'availableCapacityPercent' | 'rentPerChannelSol' | 'slotMs'>;
+type TimelineInputs = Pick<ModelInputs, 'availableCapacityPercent' | 'blockCostUnits' | 'rentPerChannelSol' | 'slotMs'>;
 
 interface Phase {
     readonly date: string;
@@ -70,7 +70,10 @@ const SPL_TOKEN_TRANSFER_COST_UNITS = 1_911;
 const TOKEN_2022_TRANSFER_COST_UNITS = 6_536;
 const V1_LIFECYCLE_COST_UNITS = 61_622;
 const STANDALONE_RECLAIM_COST_UNITS = 1_661;
-const V2_NO_VOUCHER_LIFECYCLE_COST_UNITS = 54_325;
+// open p50 (36,086) + bundled no-voucher settle_and_seal + TERMINAL distribute (~21,300; refund,
+// dust sweep, escrow close — not the interim OPEN-state payout the earlier 54,325 was built on) +
+// standalone reclaim (1,661). See MODEL_REVIEW.md finding 3.
+const V2_NO_VOUCHER_LIFECYCLE_COST_UNITS = 59_047;
 const USER_STEPS = [0, 1, 10, 100, 1_000, 10_000, 100_000, 1_000_000, 10_000_000, 100_000_000] as const;
 const SETTLEMENT_CLOCK_OPTIONS = [
     { label: 'Disabled', value: 0 },
@@ -122,6 +125,7 @@ const PHASES: readonly Phase[] = [
         id: 'p-token',
         inputs: {
             availableCapacityPercent: 50,
+            blockCostUnits: 100_000_000,
             rentPerChannelSol: 0.00471192,
             slotMs: 400,
         },
@@ -134,6 +138,7 @@ const PHASES: readonly Phase[] = [
         id: 'today',
         inputs: {
             availableCapacityPercent: 50,
+            blockCostUnits: 100_000_000,
             rentPerChannelSol: 0.00471192,
             slotMs: 400,
         },
@@ -142,10 +147,12 @@ const PHASES: readonly Phase[] = [
     },
     {
         date: 'Q3 2026',
-        description: 'Slots fall to 200ms; the block cost limit remains an independent scenario input.',
+        description:
+            'Slots fall to 200ms with 50M-CU blocks (Agave slot_params) — CU/s is preserved at ~250M, not doubled. Block limit stays editable.',
         id: '200ms-slots',
         inputs: {
             availableCapacityPercent: 50,
+            blockCostUnits: 50_000_000,
             rentPerChannelSol: 0.000471192,
             slotMs: 200,
         },
@@ -292,10 +299,6 @@ function SelectKnob({ disabled = false, help, label, onChange, options, value }:
             </div>
         </div>
     );
-}
-
-function v1SettlementCostPerChannel(batchSize: number): number {
-    return 3_166 + 1_043 / batchSize;
 }
 
 function v2SettlementCostPerChannel(batchSize: number): number {
@@ -483,7 +486,9 @@ export function App() {
     const physicalTransactionsPerSecond = isChannel
         ? channelLifecyclesPerSecond + // open, one channel / tx
           channelLifecyclesPerSecond + // terminal settle_and_seal + distribute, one channel / tx
-          channelLifecyclesPerSecond / inputs.reclaimBatchSize // batched reclaim
+          channelLifecyclesPerSecond / inputs.reclaimBatchSize + // batched reclaim
+          // v2 only: one ADR-004 batch-settle tx per settlementBatchSize channels (v1 has no interim settle).
+          (inputs.mode === 'channel-v2' ? channelLifecyclesPerSecond / inputs.settlementBatchSize : 0)
         : logicalRequestsPerSecond;
     const liveChannels = isChannel ? demand.users : 0;
     const rentWorkingCapital = liveChannels * inputs.rentPerChannelSol;
@@ -908,20 +913,18 @@ export function App() {
 
                             <div className="knob-card">
                                 <h3>Instruction batching</h3>
-                                <RangeKnob
-                                    format={value => `${value} channels / tx`}
-                                    help={
-                                        inputs.mode === 'channel-v1'
-                                            ? 'Repeated [Ed25519, settle] pairs; packet-bound'
-                                            : 'One ADR-004 commitment; account-bound'
-                                    }
-                                    label="Settlement batch"
-                                    max={inputs.mode === 'channel-v1' ? 5 : 59}
-                                    min={1}
-                                    onChange={value => updateInput('settlementBatchSize', value)}
-                                    step={1}
-                                    value={inputs.settlementBatchSize}
-                                />
+                                {inputs.mode === 'channel-v2' && (
+                                    <RangeKnob
+                                        format={value => `${value} channels / tx`}
+                                        help="One ADR-004 commitment batches many channels' settles; account-bound (≤59)"
+                                        label="Settlement batch"
+                                        max={59}
+                                        min={1}
+                                        onChange={value => updateInput('settlementBatchSize', value)}
+                                        step={1}
+                                        value={inputs.settlementBatchSize}
+                                    />
+                                )}
                                 <RangeKnob
                                     format={value => `${value} instructions / tx`}
                                     help="Observed current program batching: 8"
@@ -941,17 +944,15 @@ export function App() {
                                         <span>Terminal distribute</span>
                                         <strong>1 channel / tx</strong>
                                     </div>
-                                    <div>
-                                        <span>Settlement cost</span>
-                                        <strong>
-                                            {formatInteger(
-                                                inputs.mode === 'channel-v1'
-                                                    ? v1SettlementCostPerChannel(inputs.settlementBatchSize)
-                                                    : v2SettlementCostPerChannel(inputs.settlementBatchSize),
-                                            )}{' '}
-                                            units / channel
-                                        </strong>
-                                    </div>
+                                    {inputs.mode === 'channel-v2' && (
+                                        <div>
+                                            <span>Batch settle cost</span>
+                                            <strong>
+                                                {formatInteger(v2SettlementCostPerChannel(inputs.settlementBatchSize))}{' '}
+                                                units / channel
+                                            </strong>
+                                        </div>
+                                    )}
                                     <div>
                                         <span>Lifecycle cost</span>
                                         <strong>{formatInteger(costPerLifecycle)} units / channel</strong>
@@ -968,12 +969,12 @@ export function App() {
                                 <h3>Off-chain voucher plane</h3>
                                 <RangeKnob
                                     format={value => `${formatCompact(value)} / s`}
-                                    help="Ed25519 voucher verifications the session service sustains"
+                                    help="Aggregate Ed25519 verify rate — a horizontally scalable fleet, not a protocol limit (~50–100k/s/core batched; 10M/s ≈ a 100–200 core fleet)"
                                     label="Voucher verification rate"
-                                    max={2_000_000}
+                                    max={20_000_000}
                                     min={250_000}
                                     onChange={value => updateInput('voucherVerifyPerSecond', value)}
-                                    step={50_000}
+                                    step={250_000}
                                     value={inputs.voucherVerifyPerSecond}
                                 />
                                 <div className="batch-table">
@@ -993,10 +994,10 @@ export function App() {
                                     </div>
                                 </div>
                                 <p className="batch-caveat">
-                                    One Ed25519 verification per incoming voucher. The report&rsquo;s top remaining-work
-                                    item is sustaining &ge;10M voucher updates/s off-chain — this knob is that ceiling,
-                                    and unlike settlement batching or payments/channel it does not amortize, so it is
-                                    often the real limiter at high amortization.
+                                    One Ed25519 verification per incoming voucher, so hitting the target means sustaining
+                                    that many voucher verifications/s off-chain — the report&rsquo;s #1 remaining-work item.
+                                    Unlike settlement batching or payments/channel this does not amortize, so at high
+                                    on-chain amortization it becomes the real limiter; scale it by adding verifier cores.
                                 </p>
                             </div>
                         </>
@@ -1035,7 +1036,7 @@ export function App() {
                     <strong>
                         {isChannel ? formatCompact(settlementsPerSecond, 2) : formatInteger(inputs.transferCostUnits)}
                     </strong>
-                    <small>{isChannel ? 'intermediate + terminal settles / second' : 'scheduler units'}</small>
+                    <small>{isChannel ? 'terminal settlements / second (one per channel close)' : 'scheduler units'}</small>
                 </article>
                 <article className="metric-card">
                     <span>{isChannel ? 'Concurrent live channels' : 'Required scheduler load'}</span>
