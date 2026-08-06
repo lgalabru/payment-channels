@@ -264,15 +264,27 @@ const SIMDS: readonly Simd[] = [
 
 // Scenario presets. A pill selection resolves to a full, VERIFIED-to-fit configuration (demand +
 // settlement stack + active SIMDs) so every preset demonstrates a successful shape (0 dropped). Three
-// axes: Scale (exclusive) and Horizon (exclusive) plus two combinable Optimize toggles. All presets ride
-// v2 + MPP — operator-signed removes the per-payment Ed25519 ceiling (so 10M fits on-chain) and gives the
-// cheapest enforceability checkpoints. The resolved (cash-sweep window, checkpoint cadence) values below
-// were found by sweeping the model for the objective of each toggle combination (see the report):
+// axes: Scale (exclusive) and Horizon (exclusive) plus two combinable Optimize toggles.
+//
+// The rail is HORIZON-dependent, because v2 is not available today:
+//   • Available today → payment channel v1 (ephemeral) + x402 client-signed vouchers, no SIMDs. The x402
+//     and MPP *modes* both assume the ADR-005 v2 persistent-channel lifecycle (see MODES_MPP_X402.md), so
+//     what actually ships today is v1 with client-signed vouchers. The off-chain Ed25519 verify plane binds
+//     here, so the today presets also scale the verify fleet to the demand (a horizontally-scalable knob,
+//     not a protocol limit). Consequence: 10M/today needs a long (~2h) cash-sweep window and its fastest
+//     enforceable finality is ~30m (per-customer x402 checkpoints are expensive).
+//   • Long-term → payment channel v2 (ADR-005 re-arm) + MPP operator-signed + the timeline SIMDs. MPP
+//     removes the per-payment Ed25519 ceiling and its ADR-004 batching gives the cheapest checkpoints, so
+//     the same 10M scale reaches ~5m finality at a fraction of today's cost.
+//
+// The resolved (cash-sweep window, checkpoint cadence) values below were found by sweeping the model for
+// the objective of each toggle combination (web/sweep.mjs mirrors the model math exactly):
 //   • Cheapest OFF → shortest fitting cash-sweep window (fast base-layer finality, more txs/fees).
-//   • Cheapest ON  → opex-minimizing window (fewest txs + least escrow float).
-//   • Fastest  ON  → layer enforceability checkpoints at the fastest cadence the budget allows.
-// Together they trace a monotone curve, e.g. at 10M/today: cheapest 1h-finality → +fastest 5m → fastest 2m,
-// at rising cost. Channel lifetime is always the 1-week max (K amortization is free — it only lowers cost).
+//   • Cheapest ON  → opex-minimizing window — the U-shaped optimum (fees dominate short windows, escrow
+//     float dominates long ones), i.e. "play with the clock" to get genuinely cheaper.
+//   • Fastest  ON  → layer enforceability checkpoints at the fastest cadence the remaining budget allows.
+// Channel lifetime is always the 1-week max (K amortization is free on v2 — it only lowers cost; on v1 it
+// is inert since each session tears the channel down).
 type PresetScale = '1M' | '10M';
 type PresetHorizon = 'today' | 'longterm';
 interface PresetSelection {
@@ -282,26 +294,34 @@ interface PresetSelection {
     readonly scale: PresetScale;
 }
 const PRESET_SIMD_IDS: readonly string[] = ['p-ata', 'precompile', 'large-tx'];
-const PRESET_LIFETIME_SECONDS = 604_800; // 1 week — max amortization, always opex-optimal
+const PRESET_LIFETIME_SECONDS = 604_800; // 1 week — max amortization, always opex-optimal (v2 only)
 const PRESET_USERS: Readonly<Record<PresetScale, number>> = { '10M': 10_000_000, '1M': 1_000_000 };
+const PRESET_VERIFY_MAX = 20_000_000; // knob ceiling; today's x402 presets scale the verify fleet to demand
+// The available-today rail is v1 + x402 (client-signed); long-term is v2 + MPP (operator-signed).
+const PRESET_RAIL: Readonly<
+    Record<PresetHorizon, { mode: ModelMode; scheme: SettlementScheme; checkpointBatch: number }>
+> = {
+    longterm: { checkpointBatch: MPP_CHECKPOINT_DEFAULT_BATCH, mode: 'channel-v2', scheme: 'mpp' },
+    today: { checkpointBatch: X402_CHECKPOINT_DEFAULT_BATCH, mode: 'channel-v1', scheme: 'x402' },
+};
 // key = `${scale}|${horizon}|${cheapest ? 1 : 0}${fastest ? 1 : 0}` → resolved (window, checkpoint) seconds.
 const PRESET_SHAPES: Readonly<Record<string, { checkpoint: number; clock: number }>> = {
     '10M|longterm|00': { checkpoint: 0, clock: 3_600 },
-    '10M|longterm|01': { checkpoint: 120, clock: 7_200 },
+    '10M|longterm|01': { checkpoint: 300, clock: 3_600 },
     '10M|longterm|10': { checkpoint: 0, clock: 3_600 },
     '10M|longterm|11': { checkpoint: 300, clock: 3_600 },
-    '10M|today|00': { checkpoint: 0, clock: 3_600 },
-    '10M|today|01': { checkpoint: 120, clock: 7_200 },
-    '10M|today|10': { checkpoint: 0, clock: 3_600 },
-    '10M|today|11': { checkpoint: 300, clock: 3_600 },
+    '10M|today|00': { checkpoint: 0, clock: 7_200 },
+    '10M|today|01': { checkpoint: 1_800, clock: 7_200 },
+    '10M|today|10': { checkpoint: 0, clock: 7_200 },
+    '10M|today|11': { checkpoint: 1_800, clock: 7_200 },
     '1M|longterm|00': { checkpoint: 0, clock: 300 },
-    '1M|longterm|01': { checkpoint: 10, clock: 1_800 },
+    '1M|longterm|01': { checkpoint: 30, clock: 300 },
     '1M|longterm|10': { checkpoint: 0, clock: 1_800 },
     '1M|longterm|11': { checkpoint: 10, clock: 1_800 },
-    '1M|today|00': { checkpoint: 0, clock: 300 },
-    '1M|today|01': { checkpoint: 10, clock: 3_600 },
+    '1M|today|00': { checkpoint: 0, clock: 600 },
+    '1M|today|01': { checkpoint: 300, clock: 600 },
     '1M|today|10': { checkpoint: 0, clock: 3_600 },
-    '1M|today|11': { checkpoint: 10, clock: 3_600 },
+    '1M|today|11': { checkpoint: 60, clock: 3_600 },
 };
 function presetKey(sel: PresetSelection): string {
     return `${sel.scale}|${sel.horizon}|${sel.cheapest ? 1 : 0}${sel.fastest ? 1 : 0}`;
@@ -893,10 +913,12 @@ export function App() {
     };
 
     // Load a full, verified-to-fit scenario from a pill selection: demand (scale + 1-week lifetime + the
-    // resolved cash-sweep window), the active-SIMD set (horizon), and the settlement stack (v2 + MPP + the
-    // resolved checkpoint cadence). Applied atomically so the app lands directly on a fitting shape.
+    // resolved cash-sweep window), the active-SIMD set (horizon), and the horizon's settlement stack (today:
+    // v1 + x402 with a demand-scaled verify fleet; long-term: v2 + MPP + the resolved checkpoint cadence).
+    // Applied atomically so the app lands directly on a fitting shape.
     const applyPreset = (sel: PresetSelection) => {
         const shape = PRESET_SHAPES[presetKey(sel)];
+        const rail = PRESET_RAIL[sel.horizon];
         const simdIds = sel.horizon === 'longterm' ? PRESET_SIMD_IDS : [];
         const params = simdParamsFor(simdIds);
         setPreset(sel);
@@ -911,11 +933,17 @@ export function App() {
         setInputs(previous => ({
             ...previous,
             ...params,
-            checkpointBatchSize: Math.min(MPP_CHECKPOINT_DEFAULT_BATCH, checkpointMaxBatch('mpp', params.largeTx)),
+            checkpointBatchSize: Math.min(rail.checkpointBatch, checkpointMaxBatch(rail.scheme, params.largeTx)),
             checkpointClockSeconds: shape.checkpoint,
-            mode: 'channel-v2',
+            mode: rail.mode,
             reclaimBatchSize: 8,
-            scheme: 'mpp',
+            scheme: rail.scheme,
+            // x402 (today) binds the off-chain Ed25519 plane, so scale the verify fleet to the demand; MPP
+            // (long-term) is operator-signed and ignores this knob.
+            voucherVerifyPerSecond:
+                sel.horizon === 'today'
+                    ? Math.min(PRESET_VERIFY_MAX, PRESET_USERS[sel.scale])
+                    : previous.voucherVerifyPerSecond,
         }));
     };
     // Clicking a pill fills any unset axis from a sensible default (10M · today · unoptimized), then re-resolves.
@@ -994,8 +1022,9 @@ export function App() {
                     </p>
                     <h1>Roadmap to 10M payments / sec</h1>
                     <p className="lede">
-                        Compare physical transfers with amortized payment channels. Every preset is editable; every
-                        number is a planning ceiling, not a throughput claim.
+                        Agentic payment volume is about to explode — and Solana is all-in on absorbing it. Model the
+                        demand, pick a rail, and pressure-test the path to 10M requests per second. Every number is an
+                        editable planning ceiling.
                     </p>
                 </div>
                 <div className="target-chip">
@@ -1006,26 +1035,6 @@ export function App() {
             </header>
 
             <section aria-label="Scenario presets" className="panel preset-panel">
-                <div className="preset-heading">
-                    <div>
-                        <strong>Scenario presets</strong>
-                        <span>
-                            One-click shapes that all fit the target on v2 · MPP. Pick a scale and horizon, then
-                            optimize — <em>Cheapest</em> and <em>Fastest</em> combine.
-                        </span>
-                    </div>
-                    {preset ? (
-                        <span className={`preset-verdict ${canHandleDemand ? 'pass' : 'over'}`}>
-                            {settlementLabel(inputs.mode, inputs.scheme)} · {formatCompact(logicalRequestsPerSecond, 0)}{' '}
-                            req/s · {formatCompact(settlementLatencySeconds, 0)}s finality ·{' '}
-                            {formatPercent(budgetSharePercent)} budget · {formatTakeRate(allInTakeRateBps)} all-in
-                        </span>
-                    ) : (
-                        <span className="preset-verdict preset-verdict-custom">
-                            Custom — pick a preset to load a fitting shape
-                        </span>
-                    )}
-                </div>
                 <div className="preset-groups">
                     <div className="preset-group">
                         <span className="preset-group-label">Scale</span>
@@ -1086,6 +1095,13 @@ export function App() {
                         </div>
                     </div>
                 </div>
+                {preset && (
+                    <span className={`preset-verdict ${canHandleDemand ? 'pass' : 'over'}`}>
+                        {settlementLabel(inputs.mode, inputs.scheme)} · {formatCompact(logicalRequestsPerSecond, 0)}{' '}
+                        req/s · {formatCompact(settlementLatencySeconds, 0)}s finality ·{' '}
+                        {formatPercent(budgetSharePercent)} budget · {formatTakeRate(allInTakeRateBps)} all-in
+                    </span>
+                )}
             </section>
 
             <section aria-labelledby="timeline-title" className="panel timeline-panel">
