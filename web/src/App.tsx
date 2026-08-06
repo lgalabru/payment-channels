@@ -195,9 +195,7 @@ interface Simd {
     readonly code: string;
     readonly href: string;
     readonly label: string;
-    readonly est: string;
     readonly status: string;
-    readonly moves: string;
     readonly note: string;
     readonly warn?: boolean;
     readonly apply?: (params: SimdParams) => SimdParams;
@@ -206,11 +204,9 @@ interface Simd {
 const SIMDS: readonly Simd[] = [
     {
         code: 'SIMD-0266',
-        est: 'shipped · Apr 2026',
         href: 'https://github.com/solana-program/token/tree/main/p-token',
         id: 'p-token',
         label: 'p-token',
-        moves: 'precedent',
         note: 'Shipped precedent: proposal to mainnet in ~13 months.',
         status: 'Shipped',
     },
@@ -221,22 +217,18 @@ const SIMDS: readonly Simd[] = [
             openCostUnits: 17_300,
         }),
         code: 'SIMD-0567',
-        est: '~mid-2027',
         href: 'https://github.com/solana-foundation/solana-improvement-documents/pull/567',
         id: 'p-ata',
         label: 'p-ATA',
-        moves: 'open cost · availability',
         note: 'ATA Create 22.9k → 4.2k CU; channel open cost drops ~52%.',
         status: 'Review',
     },
     {
         apply: params => ({ ...params, voucherSigFeeRemoved: true }),
         code: 'SIMD-0568',
-        est: 'after 0565 + migration',
         href: 'https://github.com/solana-foundation/solana-improvement-documents/pull/568',
         id: 'precompile',
         label: 'Precompile removal',
-        moves: 'fees · packing',
         note: 'Cuts voucher fee 10k → 5k lamports; requires migration.',
         status: 'Review',
         warn: true,
@@ -244,11 +236,9 @@ const SIMDS: readonly Simd[] = [
     {
         apply: params => ({ ...params, largeTx: true }),
         code: 'SIMD-0296 / 0385',
-        est: 'Q3 2026 target',
         href: 'https://github.com/solana-foundation/solana-improvement-documents/blob/main/proposals/0296-larger-transactions.md',
         id: 'large-tx',
         label: '4kB transactions',
-        moves: 'packing',
         note: 'Lets x402 pack 5 → 16 settles per checkpoint.',
         status: 'Review',
     },
@@ -913,9 +903,6 @@ export function App() {
                                     <span className="simd-status">{simd.status}</span>
                                 </span>
                                 <strong>{simd.label}</strong>
-                                <span className="simd-moves">
-                                    {simd.moves} · {simd.est}
-                                </span>
                                 <small>
                                     {simd.note}{' '}
                                     <a href={simd.href} rel="noopener noreferrer" target="_blank">

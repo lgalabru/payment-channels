@@ -265,12 +265,6 @@ h1 {
     text-transform: uppercase;
 }
 
-.simd-moves {
-    color: var(--muted);
-    font-size: 0.68rem;
-    text-transform: uppercase;
-}
-
 .simd-card small {
     color: var(--muted);
     font-size: 0.74rem;
