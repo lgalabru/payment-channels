@@ -1421,18 +1421,19 @@ export function App() {
                 <div className="batch-explainer">
                     <div>
                         <span className="batch-explainer-label">Available today</span>
-                        <strong>One channel per checkpoint</strong>
+                        <strong>MPP and x402 both work</strong>
                         <p>
-                            Plain v1 can settle one client-signed voucher per transaction. The ordinary settle path is
-                            available today; multi-channel settlement batching is not.
+                            Plain v1, x402, and MPP all use the deployed one-channel settlement path. MPP removes the
+                            per-payment client signature check, but it does not yet batch distinct customer channels.
                         </p>
                     </div>
                     <div>
                         <span className="batch-explainer-label">Long-term · ADR-004</span>
-                        <strong>Up to 59 channel updates per settle</strong>
+                        <strong>MPP batches up to 59 channel updates</strong>
                         <p>
-                            An MPP operator can sign one batch for distinct customers. The 59 is an account-limit bound,
-                            not 59 instructions, and is intentionally unavailable in the today preset.
+                            ADR-004 adds the multi-customer batch to the MPP path that already exists today. The 59 is
+                            an account-limit bound, not 59 instructions, and that batching capability is unavailable in
+                            the today preset.
                         </p>
                     </div>
                 </div>
