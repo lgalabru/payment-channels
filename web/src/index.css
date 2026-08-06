@@ -937,6 +937,177 @@ progress::-moz-progress-bar {
     max-width: 920px;
 }
 
+.opex-summary {
+    background: #111111;
+    border: 1px solid var(--border-strong);
+    border-radius: 8px;
+    margin: 0 0 24px;
+    overflow: hidden;
+}
+
+.opex-summary-heading,
+.opex-group-heading,
+.opex-total {
+    align-items: end;
+    display: flex;
+    gap: 20px;
+    justify-content: space-between;
+}
+
+.opex-summary-heading {
+    border-bottom: 1px solid var(--border);
+    padding: 14px 16px;
+}
+
+.opex-summary-heading span,
+.opex-group-heading span,
+.opex-total > div > span {
+    color: var(--accent);
+    display: block;
+    font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
+    font-size: 0.7rem;
+    font-weight: 700;
+    text-transform: uppercase;
+}
+
+.opex-summary-heading small,
+.opex-group-heading p,
+.opex-total small,
+.opex-total > span {
+    color: var(--muted);
+    font-size: 0.72rem;
+    line-height: 1.45;
+    margin: 4px 0 0;
+}
+
+.opex-summary-heading > strong {
+    font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
+    font-size: 0.78rem;
+    font-variant-numeric: tabular-nums;
+    text-align: right;
+}
+
+.opex-comparison {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 128px minmax(0, 1fr);
+}
+
+.opex-rail,
+.opex-versus {
+    display: flex;
+    flex-direction: column;
+    min-height: 118px;
+    padding: 18px;
+}
+
+.opex-rail + .opex-versus,
+.opex-versus + .opex-rail {
+    border-left: 1px solid var(--border);
+}
+
+.opex-rail > span,
+.opex-rail small,
+.opex-versus small {
+    color: var(--muted);
+    font-size: 0.7rem;
+}
+
+.opex-rail > span {
+    text-transform: uppercase;
+}
+
+.opex-rail strong,
+.opex-versus strong,
+.opex-total > strong {
+    font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -0.04em;
+}
+
+.opex-rail strong {
+    font-size: clamp(1.3rem, 2.1vw, 1.8rem);
+    margin: auto 0 4px;
+}
+
+.opex-rail-selected {
+    background: var(--accent-dim);
+}
+
+.opex-rail-selected > span,
+.opex-rail-selected strong {
+    color: var(--accent);
+}
+
+.opex-versus {
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+}
+
+.opex-versus strong {
+    font-size: 1.05rem;
+}
+
+.opex-versus small {
+    margin-top: 5px;
+}
+
+.opex-groups {
+    display: grid;
+    gap: 16px;
+}
+
+.opex-group {
+    border-top: 1px solid var(--border-strong);
+    padding-top: 16px;
+}
+
+.opex-group-heading {
+    margin: 0 2px 12px;
+}
+
+.opex-group-heading h3 {
+    font-size: 0.96rem;
+    margin: 4px 0 0;
+}
+
+.opex-group-heading p {
+    max-width: 380px;
+    text-align: right;
+}
+
+.opex-capital-group .opex-group-heading span {
+    color: var(--success);
+}
+
+.opex-metrics-grid {
+    display: grid;
+    gap: 1px;
+    grid-template-columns: repeat(3, 1fr);
+}
+
+.opex-metrics-grid .metric-card {
+    min-height: 112px;
+}
+
+.opex-total {
+    background: var(--panel-raised);
+    border: 1px solid var(--border-strong);
+    border-radius: 8px;
+    margin-top: 16px;
+    padding: 16px 18px;
+}
+
+.opex-total > strong {
+    font-size: clamp(1.35rem, 2.6vw, 2rem);
+    margin-left: auto;
+}
+
+.opex-total > span {
+    max-width: 130px;
+    text-align: right;
+}
+
 footer {
     border-bottom: 5px solid var(--accent);
     color: var(--muted);
@@ -1091,6 +1262,45 @@ footer p {
 
     .metric-card {
         min-height: 125px;
+    }
+
+    .opex-comparison {
+        grid-template-columns: 1fr 100px 1fr;
+    }
+}
+
+@media (max-width: 680px) {
+    .opex-summary-heading,
+    .opex-group-heading,
+    .opex-total {
+        align-items: flex-start;
+        flex-direction: column;
+    }
+
+    .opex-summary-heading > strong,
+    .opex-group-heading p,
+    .opex-total > span {
+        text-align: left;
+    }
+
+    .opex-comparison,
+    .opex-metrics-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .opex-rail + .opex-versus,
+    .opex-versus + .opex-rail {
+        border-left: 0;
+        border-top: 1px solid var(--border);
+    }
+
+    .opex-versus {
+        min-height: auto;
+        padding: 12px;
+    }
+
+    .opex-total > strong {
+        margin-left: 0;
     }
 }
 

@@ -128,7 +128,7 @@ const CHANNEL_LIFETIME_OPTIONS = [
 
 const DEFAULT_DEMAND: DemandInputs = {
     averageRequestsPerMinutePerUser: 60,
-    averageTransactionValueUsd: 0.001,
+    averageTransactionValueUsd: 0.05,
     capitalCostAnnualPercent: 8,
     channelLifetimeSeconds: 86_400,
     priorityFeeLamportsPerTx: 0,
@@ -589,7 +589,6 @@ export function App() {
     const liveChannels = isChannel ? demand.users : 0;
     const rentWorkingCapital = liveChannels * inputs.rentPerChannelSol;
     const grossValuePerSecondUsd = logicalRequestsPerSecond * demand.averageTransactionValueUsd;
-    const valuePerSettlementUsd = requestsPerSettlement * demand.averageTransactionValueUsd;
     const canHandleDemand = logicalRequestsPerSecond <= sustainableCeiling;
 
     // Settlement reckoning: rates hide the absolute on-chain work and the time to clear it.
@@ -617,6 +616,18 @@ export function App() {
     const networkFeeSolPerSecond = networkFeeLamportsPerSecond / LAMPORTS_PER_SOL;
     const networkFeeUsdPerSecond = networkFeeSolPerSecond * demand.solPriceUsd;
     const feeTakeRateBps = grossValuePerSecondUsd > 0 ? (networkFeeUsdPerSecond / grossValuePerSecondUsd) * 10_000 : 0;
+    const vanillaNetworkFeeUsdPerSecond =
+        ((logicalRequestsPerSecond * (BASE_FEE_LAMPORTS_PER_SIGNATURE + demand.priorityFeeLamportsPerTx)) /
+            LAMPORTS_PER_SOL) *
+        demand.solPriceUsd;
+    const vanillaFeeTakeRateBps =
+        grossValuePerSecondUsd > 0 ? (vanillaNetworkFeeUsdPerSecond / grossValuePerSecondUsd) * 10_000 : 0;
+    const networkFeeMultiplier =
+        networkFeeUsdPerSecond > 0 ? vanillaNetworkFeeUsdPerSecond / networkFeeUsdPerSecond : Infinity;
+    const networkFeeSavingsUsdPerDay = Math.max(
+        0,
+        (vanillaNetworkFeeUsdPerSecond - networkFeeUsdPerSecond) * SECONDS_PER_DAY,
+    );
 
     // Working capital tied up (refundable, not burned): channel + escrow rent, plus the escrow float —
     // value accumulated within one settlement window before it settles on-chain and the deposit refreshes.
@@ -1214,9 +1225,12 @@ export function App() {
                 <div className="section-heading">
                     <div>
                         <p className="section-index">04</p>
-                        <h2 id="opex-title">Operating cost</h2>
+                        <h2 id="opex-title">Operating economics</h2>
                     </div>
-                    <p>Dollar cost of running the rail at the selected demand — network fees and tied-up capital. Separate from the CU capacity math above.</p>
+                    <p>
+                        Compare the network burn with vanilla transfers, then size the refundable capital needed to run
+                        the rail. Separate from the CU capacity math above.
+                    </p>
                 </div>
 
                 <div className="demand-controls opex-controls">
@@ -1262,49 +1276,107 @@ export function App() {
                     />
                 </div>
 
-                <section aria-label="Operating cost metrics" className="metrics-grid">
-                    <article className="metric-card">
-                        <span>Gross transaction value</span>
-                        <strong>{formatUsd(grossValuePerSecondUsd)}</strong>
-                        <small>per second; excluded from CU math</small>
-                    </article>
-                    <article className="metric-card">
-                        <span>{isChannel ? 'Value per settlement' : 'Average transaction value'}</span>
-                        <strong>{formatUsd(isChannel ? valuePerSettlementUsd : demand.averageTransactionValueUsd)}</strong>
-                        <small>
-                            {isChannel ? `${formatCompact(requestsPerSettlement, 2)} requests amortized` : 'per transfer'}
-                        </small>
-                    </article>
-                    <article className="metric-card">
-                        <span>Network fees</span>
-                        <strong>{formatUsd(networkFeeUsdPerSecond * SECONDS_PER_DAY)}</strong>
-                        <small>per day · {formatUsd(networkFeeUsdPerSecond * SECONDS_PER_MONTH)} / month</small>
-                    </article>
-                    <article className="metric-card">
-                        <span>Fee take-rate</span>
-                        <strong>{formatTakeRate(feeTakeRateBps)}</strong>
-                        <small>network's cut of gross value</small>
-                    </article>
-                    <article className="metric-card">
-                        <span>Refundable rent capital</span>
-                        <strong>{formatUsd(rentWorkingCapitalUsd)}</strong>
-                        <small>{formatCompact(rentWorkingCapital, 2)} SOL across {formatCompact(liveChannels, 2)} channels</small>
-                    </article>
-                    <article className="metric-card">
-                        <span>Escrow float</span>
-                        <strong>{formatUsd(escrowFloatUsd)}</strong>
-                        <small>value in flight per settlement window</small>
-                    </article>
-                    <article className="metric-card">
-                        <span>Capital carrying cost</span>
-                        <strong>{formatUsd(capitalCarryingCostUsdPerYear)}</strong>
-                        <small>per year on {formatUsd(workingCapitalUsd)} tied up</small>
-                    </article>
-                    <article className="metric-card">
-                        <span>All-in operating cost</span>
-                        <strong>{formatUsd(totalOpexUsdPerYear)}</strong>
-                        <small>per year · {formatTakeRate(allInTakeRateBps)} all-in</small>
-                    </article>
+                <section aria-label="Network fee comparison" className="opex-summary">
+                    <div className="opex-summary-heading">
+                        <div>
+                            <span>Network cost — actual burn</span>
+                            <small>These fees leave the rail. They are not refundable.</small>
+                        </div>
+                        <strong>{formatUsd(grossValuePerSecondUsd * SECONDS_PER_DAY)} gross value / day</strong>
+                    </div>
+                    <div className="opex-comparison">
+                        <article className="opex-rail opex-rail-selected">
+                            <span>{MODE_LABELS[inputs.mode]}</span>
+                            <strong>{formatUsd(networkFeeUsdPerSecond * SECONDS_PER_DAY)} / day</strong>
+                            <small>{formatTakeRate(feeTakeRateBps)} network take-rate</small>
+                        </article>
+                        <div className="opex-versus" aria-label="Comparison result">
+                            {inputs.mode === 'vanilla' ? (
+                                <>
+                                    <strong>Baseline</strong>
+                                    <small>every payment settles on-chain</small>
+                                </>
+                            ) : (
+                                <>
+                                    <strong>{formatCompact(networkFeeMultiplier, 1)}× lower</strong>
+                                    <small>{formatUsd(networkFeeSavingsUsdPerDay)} saved / day</small>
+                                </>
+                            )}
+                        </div>
+                        <article className="opex-rail">
+                            <span>Vanilla transfers</span>
+                            <strong>{formatUsd(vanillaNetworkFeeUsdPerSecond * SECONDS_PER_DAY)} / day</strong>
+                            <small>{formatTakeRate(vanillaFeeTakeRateBps)} network take-rate</small>
+                        </article>
+                    </div>
+                </section>
+
+                <div className="opex-groups">
+                    <section aria-label="Selected rail network costs" className="opex-group">
+                        <div className="opex-group-heading">
+                            <div>
+                                <span>Selected rail</span>
+                                <h3>Network fee breakdown</h3>
+                            </div>
+                            <p>Recurring costs that are paid to the network.</p>
+                        </div>
+                        <div className="opex-metrics-grid">
+                            <article className="metric-card">
+                                <span>Network fees</span>
+                                <strong>{formatUsd(networkFeeUsdPerSecond * SECONDS_PER_DAY)}</strong>
+                                <small>per day · {formatUsd(networkFeeUsdPerSecond * SECONDS_PER_MONTH)} / month</small>
+                            </article>
+                            <article className="metric-card">
+                                <span>Fee take-rate</span>
+                                <strong>{formatTakeRate(feeTakeRateBps)}</strong>
+                                <small>network's cut of gross value</small>
+                            </article>
+                            <article className="metric-card">
+                                <span>Annual network spend</span>
+                                <strong>{formatUsd(feeUsdPerYear)}</strong>
+                                <small>base and selected priority fees</small>
+                            </article>
+                        </div>
+                    </section>
+
+                    <section aria-label="Refundable capital requirements" className="opex-group opex-capital-group">
+                        <div className="opex-group-heading">
+                            <div>
+                                <span>Capital required — refundable</span>
+                                <h3>Working capital, not a fee</h3>
+                            </div>
+                            <p>These balances stay in the rail; only the annual carrying cost is an expense.</p>
+                        </div>
+                        <div className="opex-metrics-grid">
+                            <article className="metric-card">
+                                <span>Refundable rent capital</span>
+                                <strong>{formatUsd(rentWorkingCapitalUsd)}</strong>
+                                <small>
+                                    {formatCompact(rentWorkingCapital, 2)} SOL across {formatCompact(liveChannels, 2)}{' '}
+                                    channels
+                                </small>
+                            </article>
+                            <article className="metric-card">
+                                <span>Escrow float</span>
+                                <strong>{formatUsd(escrowFloatUsd)}</strong>
+                                <small>value in flight per settlement window</small>
+                            </article>
+                            <article className="metric-card">
+                                <span>Capital carrying cost</span>
+                                <strong>{formatUsd(capitalCarryingCostUsdPerYear)}</strong>
+                                <small>per year on {formatUsd(workingCapitalUsd)} tied up</small>
+                            </article>
+                        </div>
+                    </section>
+                </div>
+
+                <section aria-label="All-in annual operating cost" className="opex-total">
+                    <div>
+                        <span>All-in annual operating cost</span>
+                        <small>Annual network spend plus the carrying cost of refundable capital.</small>
+                    </div>
+                    <strong>{formatUsd(totalOpexUsdPerYear)}</strong>
+                    <span>{formatTakeRate(allInTakeRateBps)} of annual gross value</span>
                 </section>
                 <p className="opex-note">
                     Fees assume {signaturesPerTransaction} signature{signaturesPerTransaction === 1 ? '' : 's'}/tx at{' '}
