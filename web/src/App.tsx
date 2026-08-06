@@ -364,7 +364,6 @@ export function App() {
     const activeScheme = inputs.scheme;
     const pinnedHorizon =
         preset?.horizon === 'longterm' ? 'Long-term' : preset?.horizon === 'today' ? 'Today' : 'Custom';
-    const totalOpexUsdPerDay = (totalOpexUsdPerYear * SECONDS_PER_DAY) / SECONDS_PER_YEAR;
     // The sticky bar is a composited layer in browsers. Remount it when the preset rail changes so
     // its painted text cannot lag behind the already-updated reducer/model state.
     const pinnedScenarioKey = `${pinnedHorizon}:${inputs.mode}:${inputs.scheme}:${activeSimds.join(',')}`;
@@ -1511,7 +1510,7 @@ export function App() {
             </section>
 
             <div
-                aria-label={`Selected payment channel daily operating cost: ${settlementLabel(inputs.mode, inputs.scheme)} ${formatUsd(totalOpexUsdPerDay)} per day`}
+                aria-label={`Selected payment channel daily network cost: ${settlementLabel(inputs.mode, inputs.scheme)} ${formatUsd(networkFeeUsdPerSecond * SECONDS_PER_DAY)} per day`}
                 aria-live="polite"
                 className="opex-sticky"
                 data-horizon={pinnedHorizon}
@@ -1522,9 +1521,9 @@ export function App() {
                     <strong className="opex-sticky-stack">{settlementLabel(inputs.mode, inputs.scheme)}</strong>
                 </div>
                 <div className="opex-sticky-metric">
-                    <span className="opex-sticky-label">All-in operating cost</span>
+                    <span className="opex-sticky-label">Network cost · actual burn</span>
                     <strong className="opex-sticky-cost">
-                        {formatUsd(totalOpexUsdPerDay)} <small>/ day</small>
+                        {formatUsd(networkFeeUsdPerSecond * SECONDS_PER_DAY)} <small>/ day</small>
                     </strong>
                 </div>
             </div>
