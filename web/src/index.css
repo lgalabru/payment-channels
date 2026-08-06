@@ -185,7 +185,9 @@ h1 {
     flex-direction: column;
     gap: 4px;
     padding: 10px 12px;
-    transition: border-color 0.12s ease, background 0.12s ease;
+    transition:
+        border-color 0.12s ease,
+        background 0.12s ease;
 }
 
 .simd-card:hover {
@@ -1535,4 +1537,112 @@ footer p {
     *::after {
         scroll-behavior: auto !important;
     }
+}
+
+/* Scenario preset bar — one-click fitting shapes, sits above the upgrade timeline and drives it. */
+.preset-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+}
+
+.preset-heading {
+    align-items: flex-start;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px 20px;
+    justify-content: space-between;
+}
+
+.preset-heading strong {
+    display: block;
+    font-size: 1rem;
+}
+
+.preset-heading > div span {
+    color: var(--muted);
+    display: block;
+    font-size: 0.82rem;
+    margin-top: 3px;
+    max-width: 52ch;
+}
+
+.preset-heading em {
+    color: var(--text);
+    font-style: normal;
+    font-weight: 600;
+}
+
+.preset-verdict {
+    background: #111111;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    color: var(--muted);
+    font-size: 0.76rem;
+    font-variant-numeric: tabular-nums;
+    padding: 6px 12px;
+    white-space: nowrap;
+}
+
+.preset-verdict.pass {
+    border-color: var(--accent);
+    color: var(--text);
+}
+
+.preset-verdict-custom {
+    font-style: italic;
+}
+
+.preset-groups {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px 22px;
+}
+
+.preset-group {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.preset-group-label {
+    color: var(--muted);
+    font-size: 0.68rem;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+}
+
+.preset-pills {
+    background: #111111;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    display: flex;
+    gap: 3px;
+    padding: 3px;
+}
+
+.preset-pills button {
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 999px;
+    color: var(--muted);
+    cursor: pointer;
+    font-size: 0.82rem;
+    font-weight: 600;
+    padding: 7px 15px;
+    transition:
+        background 0.12s ease,
+        color 0.12s ease,
+        border-color 0.12s ease;
+    white-space: nowrap;
+}
+
+.preset-pills button:hover {
+    color: var(--text);
+}
+
+.preset-pills button.active {
+    background: var(--accent-dim);
+    border-color: var(--accent);
+    color: var(--accent);
 }

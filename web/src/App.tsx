@@ -189,7 +189,13 @@ const TODAY: ModelInputs = {
 // Applied in array order — rent ÷2 before rent ÷10 (÷10 supersedes), p-ATA before Alpenglow (bumps stack).
 type SimdParams = Pick<
     ModelInputs,
-    'availableCapacityPercent' | 'blockCostUnits' | 'slotMs' | 'rentPerChannelSol' | 'openCostUnits' | 'voucherSigFeeRemoved' | 'largeTx'
+    | 'availableCapacityPercent'
+    | 'blockCostUnits'
+    | 'slotMs'
+    | 'rentPerChannelSol'
+    | 'openCostUnits'
+    | 'voucherSigFeeRemoved'
+    | 'largeTx'
 >;
 const BASELINE_RENT_SOL = 0.00471192;
 const BASELINE_SIMD_PARAMS: SimdParams = {
@@ -255,6 +261,51 @@ const SIMDS: readonly Simd[] = [
         status: 'Review',
     },
 ];
+
+// Scenario presets. A pill selection resolves to a full, VERIFIED-to-fit configuration (demand +
+// settlement stack + active SIMDs) so every preset demonstrates a successful shape (0 dropped). Three
+// axes: Scale (exclusive) and Horizon (exclusive) plus two combinable Optimize toggles. All presets ride
+// v2 + MPP — operator-signed removes the per-payment Ed25519 ceiling (so 10M fits on-chain) and gives the
+// cheapest enforceability checkpoints. The resolved (cash-sweep window, checkpoint cadence) values below
+// were found by sweeping the model for the objective of each toggle combination (see the report):
+//   • Cheapest OFF → shortest fitting cash-sweep window (fast base-layer finality, more txs/fees).
+//   • Cheapest ON  → opex-minimizing window (fewest txs + least escrow float).
+//   • Fastest  ON  → layer enforceability checkpoints at the fastest cadence the budget allows.
+// Together they trace a monotone curve, e.g. at 10M/today: cheapest 1h-finality → +fastest 5m → fastest 2m,
+// at rising cost. Channel lifetime is always the 1-week max (K amortization is free — it only lowers cost).
+type PresetScale = '1M' | '10M';
+type PresetHorizon = 'today' | 'longterm';
+interface PresetSelection {
+    readonly cheapest: boolean;
+    readonly fastest: boolean;
+    readonly horizon: PresetHorizon;
+    readonly scale: PresetScale;
+}
+const PRESET_SIMD_IDS: readonly string[] = ['p-ata', 'precompile', 'large-tx'];
+const PRESET_LIFETIME_SECONDS = 604_800; // 1 week — max amortization, always opex-optimal
+const PRESET_USERS: Readonly<Record<PresetScale, number>> = { '10M': 10_000_000, '1M': 1_000_000 };
+// key = `${scale}|${horizon}|${cheapest ? 1 : 0}${fastest ? 1 : 0}` → resolved (window, checkpoint) seconds.
+const PRESET_SHAPES: Readonly<Record<string, { checkpoint: number; clock: number }>> = {
+    '10M|longterm|00': { checkpoint: 0, clock: 3_600 },
+    '10M|longterm|01': { checkpoint: 120, clock: 7_200 },
+    '10M|longterm|10': { checkpoint: 0, clock: 3_600 },
+    '10M|longterm|11': { checkpoint: 300, clock: 3_600 },
+    '10M|today|00': { checkpoint: 0, clock: 3_600 },
+    '10M|today|01': { checkpoint: 120, clock: 7_200 },
+    '10M|today|10': { checkpoint: 0, clock: 3_600 },
+    '10M|today|11': { checkpoint: 300, clock: 3_600 },
+    '1M|longterm|00': { checkpoint: 0, clock: 300 },
+    '1M|longterm|01': { checkpoint: 10, clock: 1_800 },
+    '1M|longterm|10': { checkpoint: 0, clock: 1_800 },
+    '1M|longterm|11': { checkpoint: 10, clock: 1_800 },
+    '1M|today|00': { checkpoint: 0, clock: 300 },
+    '1M|today|01': { checkpoint: 10, clock: 3_600 },
+    '1M|today|10': { checkpoint: 0, clock: 3_600 },
+    '1M|today|11': { checkpoint: 10, clock: 3_600 },
+};
+function presetKey(sel: PresetSelection): string {
+    return `${sel.scale}|${sel.horizon}|${sel.cheapest ? 1 : 0}${sel.fastest ? 1 : 0}`;
+}
 
 const MODE_LABELS: Readonly<Record<ModelMode, string>> = {
     'channel-v1': 'Payment channel v1',
@@ -561,7 +612,11 @@ function readSharedParams(): { demand: Partial<DemandInputs>; mode?: ModelMode; 
         demand.settlementClockSeconds = clock;
     }
 
-    return { demand, mode: QUERY_TO_MODE[params.get('method') ?? ''], scheme: QUERY_TO_SCHEME[params.get('scheme') ?? ''] };
+    return {
+        demand,
+        mode: QUERY_TO_MODE[params.get('method') ?? ''],
+        scheme: QUERY_TO_SCHEME[params.get('scheme') ?? ''],
+    };
 }
 
 export function App() {
@@ -576,6 +631,9 @@ export function App() {
     });
     const [demand, setDemand] = useState<DemandInputs>(() => ({ ...DEFAULT_DEMAND, ...readSharedParams().demand }));
     const [activeSimds, setActiveSimds] = useState<readonly string[]>([]);
+    // Which scenario preset (if any) the current state was loaded from. Cleared to null on any manual edit,
+    // so the pills reflect "this is exactly the preset" vs "customized from here".
+    const [preset, setPreset] = useState<PresetSelection | null>(null);
 
     // Mirror the four shareable knobs into the URL query so any configuration is linkable.
     // Debounced + guarded: dragging a range slider fires an `input` event per pixel, so a single
@@ -718,10 +776,19 @@ export function App() {
 
     // Settlement reckoning: rates hide the absolute on-chain work and the time to clear it.
     // Backlog factor >1 means the chain cannot keep up with the OFFERED demand and the queue grows.
-    const onChainBacklogFactor = availableBudgetPerSecond > 0 ? requiredBudgetPerSecond / availableBudgetPerSecond : Infinity;
-    // A payment cannot settle before its session closes, then must wait out the on-chain drain if over budget.
+    const onChainBacklogFactor =
+        availableBudgetPerSecond > 0 ? requiredBudgetPerSecond / availableBudgetPerSecond : Infinity;
+    // Enforceable finality: without checkpoints a payment is claimable on-chain only when its session closes
+    // (one cash-sweep window). Enforceability checkpoints post an interim settle on a faster cadence, so the
+    // accrued value becomes claimable within the checkpoint window instead — that (not the long cash-sweep
+    // window) is the real time-to-finality when checkpoints run.
+    const enforceableFinalitySeconds = checkpointsEnabled
+        ? Math.min(inputs.checkpointClockSeconds, Number.isFinite(channelLifeSeconds) ? channelLifeSeconds : Infinity)
+        : channelLifeSeconds;
+    // A payment cannot settle before its enforceable-finality window, then must wait out the on-chain drain if over budget.
     const settlementLatencySeconds = isChannel
-        ? (Number.isFinite(channelLifeSeconds) ? channelLifeSeconds : 0) * Math.max(1, onChainBacklogFactor)
+        ? (Number.isFinite(enforceableFinalitySeconds) ? enforceableFinalitySeconds : 0) *
+          Math.max(1, onChainBacklogFactor)
         : Math.max(1, onChainBacklogFactor) / Math.max(blocksPerSecond, 0.001);
     // On-chain transactions generated over one settlement window, and chain-time to land them.
     const settlementWindowSeconds = isChannel && Number.isFinite(channelLifeSeconds) ? channelLifeSeconds : 1;
@@ -769,14 +836,17 @@ export function App() {
         grossValuePerSecondUsd > 0 ? (totalOpexUsdPerYear / (grossValuePerSecondUsd * SECONDS_PER_YEAR)) * 10_000 : 0;
 
     const updateInput = <Key extends keyof ModelInputs>(key: Key, value: ModelInputs[Key]) => {
+        setPreset(null);
         setInputs(previous => ({ ...previous, [key]: value }));
     };
 
     const updateDemand = <Key extends keyof DemandInputs>(key: Key, value: DemandInputs[Key]) => {
+        setPreset(null);
         setDemand(previous => ({ ...previous, [key]: value }));
     };
 
     const updateArrivingDemand = (key: ArrivingDemandKey, value: number) => {
+        setPreset(null);
         setDemand(previous => clampArrivingDemand(previous, key, value));
     };
 
@@ -784,6 +854,7 @@ export function App() {
     // current channel lifetime bumps the lifetime up to the smallest option that still contains the clock.
     // Keeps K ≥ 1 meaningful and makes the K=1 corner reachable only at lifetime == clock (where v2 == v1).
     const updateSettlementClock = (clockSeconds: number) => {
+        setPreset(null);
         setDemand(previous => {
             if (clockSeconds > 0 && previous.channelLifetimeSeconds < clockSeconds) {
                 const bumped = CHANNEL_LIFETIME_OPTIONS.find(option => option.value >= clockSeconds);
@@ -798,20 +869,59 @@ export function App() {
     // Toggle a timeline SIMD, then recompute the SIMD-controlled inputs from baseline by stacking every
     // active SIMD's delta in array order. Non-SIMD fields (mode, checkpoint cadence, reclaim batch, etc.)
     // are preserved; the checkpoint batch is clamped to whatever the new packing regime allows.
-    const toggleSimd = (id: string) => {
-        const next = activeSimds.includes(id) ? activeSimds.filter(other => other !== id) : [...activeSimds, id];
-        const params = SIMDS.reduce<SimdParams>(
-            (accumulated, simd) => (next.includes(simd.id) && simd.apply ? simd.apply(accumulated) : accumulated),
+    const simdParamsFor = (ids: readonly string[]): SimdParams =>
+        SIMDS.reduce<SimdParams>(
+            (accumulated, simd) => (ids.includes(simd.id) && simd.apply ? simd.apply(accumulated) : accumulated),
             { ...BASELINE_SIMD_PARAMS },
         );
+
+    const toggleSimd = (id: string) => {
+        const next = activeSimds.includes(id) ? activeSimds.filter(other => other !== id) : [...activeSimds, id];
+        const params = simdParamsFor(next);
+        setPreset(null);
         setActiveSimds(next);
         setInputs(previous => {
             const merged = { ...previous, ...params };
             return {
                 ...merged,
-                checkpointBatchSize: Math.min(merged.checkpointBatchSize, checkpointMaxBatch(merged.scheme, merged.largeTx)),
+                checkpointBatchSize: Math.min(
+                    merged.checkpointBatchSize,
+                    checkpointMaxBatch(merged.scheme, merged.largeTx),
+                ),
             };
         });
+    };
+
+    // Load a full, verified-to-fit scenario from a pill selection: demand (scale + 1-week lifetime + the
+    // resolved cash-sweep window), the active-SIMD set (horizon), and the settlement stack (v2 + MPP + the
+    // resolved checkpoint cadence). Applied atomically so the app lands directly on a fitting shape.
+    const applyPreset = (sel: PresetSelection) => {
+        const shape = PRESET_SHAPES[presetKey(sel)];
+        const simdIds = sel.horizon === 'longterm' ? PRESET_SIMD_IDS : [];
+        const params = simdParamsFor(simdIds);
+        setPreset(sel);
+        setActiveSimds(simdIds);
+        setDemand(previous => ({
+            ...previous,
+            averageRequestsPerMinutePerUser: 60,
+            channelLifetimeSeconds: PRESET_LIFETIME_SECONDS,
+            settlementClockSeconds: shape.clock,
+            users: PRESET_USERS[sel.scale],
+        }));
+        setInputs(previous => ({
+            ...previous,
+            ...params,
+            checkpointBatchSize: Math.min(MPP_CHECKPOINT_DEFAULT_BATCH, checkpointMaxBatch('mpp', params.largeTx)),
+            checkpointClockSeconds: shape.checkpoint,
+            mode: 'channel-v2',
+            reclaimBatchSize: 8,
+            scheme: 'mpp',
+        }));
+    };
+    // Clicking a pill fills any unset axis from a sensible default (10M · today · unoptimized), then re-resolves.
+    const choosePreset = (patch: Partial<PresetSelection>) => {
+        const current: PresetSelection = preset ?? { cheapest: false, fastest: false, horizon: 'today', scale: '10M' };
+        applyPreset({ ...current, ...patch });
     };
 
     const activeBaseMethod = baseMethodOf(inputs.mode);
@@ -823,6 +933,7 @@ export function App() {
     const selectBaseMethod = (base: BaseMethod) => {
         const mode: ModelMode = base === 'vanilla' ? 'vanilla' : base === 'v1' ? 'channel-v1' : 'channel-v2';
         if (mode === inputs.mode) return;
+        setPreset(null);
         const transferCostUnits =
             inputs.transferKind === 'spl-token' ? SPL_TOKEN_TRANSFER_COST_UNITS : TOKEN_2022_TRANSFER_COST_UNITS;
         setInputs(previous => {
@@ -838,6 +949,7 @@ export function App() {
     // a scheme resets the checkpoint batch to that scheme's natural default but does NOT auto-enable the
     // checkpoint cadence — checkpoints stay opt-in via the cadence knob.
     const selectScheme = (scheme: 'x402' | 'mpp') => {
+        setPreset(null);
         setInputs(previous => {
             const nextScheme: SettlementScheme = previous.scheme === scheme ? 'none' : scheme;
             const checkpointBatchSize =
@@ -851,6 +963,7 @@ export function App() {
     };
 
     const selectTransferKind = (transferKind: TransferKind) => {
+        setPreset(null);
         const transferCostUnits =
             transferKind === 'spl-token' ? SPL_TOKEN_TRANSFER_COST_UNITS : TOKEN_2022_TRANSFER_COST_UNITS;
         setInputs(previous => ({ ...previous, transferCostUnits, transferKind }));
@@ -861,8 +974,19 @@ export function App() {
             <header className="hero">
                 <div>
                     <p className="eyebrow">
-                        <a href="https://github.com/solana-foundation/payment-channels" target="_blank" rel="noopener noreferrer" style={{ color: 'white', textDecoration: 'none' }}>
-                            <svg width="16" height="16" viewBox="0 0 24 24" fill="white" style={{ display: 'inline-block', marginRight: '6px', verticalAlign: 'text-bottom' }}>
+                        <a
+                            href="https://github.com/solana-foundation/payment-channels"
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            style={{ color: 'white', textDecoration: 'none' }}
+                        >
+                            <svg
+                                width="16"
+                                height="16"
+                                viewBox="0 0 24 24"
+                                fill="white"
+                                style={{ display: 'inline-block', marginRight: '6px', verticalAlign: 'text-bottom' }}
+                            >
                                 <path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v 3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z" />
                             </svg>
                             SOLANA-FOUNDATION/PAYMENT-CHANNELS
@@ -881,6 +1005,89 @@ export function App() {
                 </div>
             </header>
 
+            <section aria-label="Scenario presets" className="panel preset-panel">
+                <div className="preset-heading">
+                    <div>
+                        <strong>Scenario presets</strong>
+                        <span>
+                            One-click shapes that all fit the target on v2 · MPP. Pick a scale and horizon, then
+                            optimize — <em>Cheapest</em> and <em>Fastest</em> combine.
+                        </span>
+                    </div>
+                    {preset ? (
+                        <span className={`preset-verdict ${canHandleDemand ? 'pass' : 'over'}`}>
+                            {settlementLabel(inputs.mode, inputs.scheme)} · {formatCompact(logicalRequestsPerSecond, 0)}{' '}
+                            req/s · {formatCompact(settlementLatencySeconds, 0)}s finality ·{' '}
+                            {formatPercent(budgetSharePercent)} budget · {formatTakeRate(allInTakeRateBps)} all-in
+                        </span>
+                    ) : (
+                        <span className="preset-verdict preset-verdict-custom">
+                            Custom — pick a preset to load a fitting shape
+                        </span>
+                    )}
+                </div>
+                <div className="preset-groups">
+                    <div className="preset-group">
+                        <span className="preset-group-label">Scale</span>
+                        <div className="preset-pills" role="group" aria-label="Target scale">
+                            {(['1M', '10M'] as const).map(scale => (
+                                <button
+                                    aria-pressed={preset?.scale === scale}
+                                    className={preset?.scale === scale ? 'active' : ''}
+                                    key={scale}
+                                    onClick={() => choosePreset({ scale })}
+                                    type="button"
+                                >
+                                    {scale} / s
+                                </button>
+                            ))}
+                        </div>
+                    </div>
+                    <div className="preset-group">
+                        <span className="preset-group-label">Horizon</span>
+                        <div className="preset-pills" role="group" aria-label="Upgrade horizon">
+                            {(
+                                [
+                                    ['today', 'Available today'],
+                                    ['longterm', 'Long-term'],
+                                ] as const
+                            ).map(([horizon, label]) => (
+                                <button
+                                    aria-pressed={preset?.horizon === horizon}
+                                    className={preset?.horizon === horizon ? 'active' : ''}
+                                    key={horizon}
+                                    onClick={() => choosePreset({ horizon })}
+                                    type="button"
+                                >
+                                    {label}
+                                </button>
+                            ))}
+                        </div>
+                    </div>
+                    <div className="preset-group">
+                        <span className="preset-group-label">Optimize</span>
+                        <div className="preset-pills" role="group" aria-label="Optimization goal">
+                            <button
+                                aria-pressed={!!preset?.cheapest}
+                                className={preset?.cheapest ? 'active' : ''}
+                                onClick={() => choosePreset({ cheapest: !preset?.cheapest })}
+                                type="button"
+                            >
+                                Cheapest
+                            </button>
+                            <button
+                                aria-pressed={!!preset?.fastest}
+                                className={preset?.fastest ? 'active' : ''}
+                                onClick={() => choosePreset({ fastest: !preset?.fastest })}
+                                type="button"
+                            >
+                                Fastest
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
             <section aria-labelledby="timeline-title" className="panel timeline-panel">
                 <div className="section-heading">
                     <div>
@@ -893,7 +1100,10 @@ export function App() {
                         const on = activeSimds.includes(simd.id);
                         const isToggle = simd.apply !== undefined;
                         return (
-                            <div className={`simd-card ${on ? 'simd-on' : ''} ${simd.warn ? 'simd-warn' : ''}`} key={simd.id}>
+                            <div
+                                className={`simd-card ${on ? 'simd-on' : ''} ${simd.warn ? 'simd-warn' : ''}`}
+                                key={simd.id}
+                            >
                                 <span className="simd-card-top">
                                     {isToggle ? (
                                         <input
@@ -967,7 +1177,11 @@ export function App() {
                     <span>Pick a base rail, then optionally a settlement scheme on top.</span>
                 </div>
                 <div className="settlement-stack">
-                    <div aria-label="Base settlement rail" className="mode-switch progress-mode-switch stack-base" role="group">
+                    <div
+                        aria-label="Base settlement rail"
+                        className="mode-switch progress-mode-switch stack-base"
+                        role="group"
+                    >
                         {BASE_METHODS.map(base => (
                             <button
                                 aria-pressed={activeBaseMethod === base.id}
@@ -1004,7 +1218,9 @@ export function App() {
                             type="button"
                         >
                             <span>MPP</span>
-                            <small><strong>sessions</strong>, operator signed</small>
+                            <small>
+                                <strong>sessions</strong>, operator signed
+                            </small>
                         </button>
                     </div>
                 </div>
@@ -1039,8 +1255,9 @@ export function App() {
                 <div className="capacity-equation">
                     <span>Logical demand</span>
                     <strong>
-                        {formatCompact(demand.users, 2)} payers × {formatInteger(demand.averageRequestsPerMinutePerUser)}{' '}
-                        paid req/payer/min ÷ 60 = {formatCompact(logicalRequestsPerSecond, 2)} req/s
+                        {formatCompact(demand.users, 2)} payers ×{' '}
+                        {formatInteger(demand.averageRequestsPerMinutePerUser)} paid req/payer/min ÷ 60 ={' '}
+                        {formatCompact(logicalRequestsPerSecond, 2)} req/s
                     </strong>
                     <small>
                         {isChannel
@@ -1070,8 +1287,8 @@ export function App() {
                             Client-signed: each logical payment is one voucher the session service verifies off-chain.
                             This caps sustained requests independently of the on-chain budget, and does not move with
                             settlement batching or payments/channel — so with heavy on-chain amortization it becomes the
-                            binding limit. Sustained throughput = {formatCompact(sustainableCeiling, 2)} req/s (min of the
-                            two ceilings).
+                            binding limit. Sustained throughput = {formatCompact(sustainableCeiling, 2)} req/s (min of
+                            the two ceilings).
                         </small>
                     </div>
                 )}
@@ -1080,7 +1297,10 @@ export function App() {
                         <span>Voucher plane</span>
                         <strong>
                             operator-signed — no per-payment verify
-                            <span className="trust-badge" title="The operator signs cumulative vouchers itself; a payer's on-chain protection is the escrow deposit cap plus off-chain dispute, not a per-payment signature.">
+                            <span
+                                className="trust-badge"
+                                title="The operator signs cumulative vouchers itself; a payer's on-chain protection is the escrow deposit cap plus off-chain dispute, not a per-payment signature."
+                            >
                                 custodial metering · deposit-bounded
                             </span>
                         </strong>
@@ -1088,11 +1308,12 @@ export function App() {
                             MPP operator-signed mode (mpp-specs #309): the operator holds the channel&rsquo;s
                             authorizedSigner and signs the cumulative voucher itself, so there is no client Ed25519 to
                             verify per request. Per-request auth is a reusable bearer proof (a cheap symmetric check),
-                            and the operator signs just one voucher per settlement (~{formatCompact(settlementsPerSecond, 2)}/s).
-                            The off-chain Ed25519 fleet no longer binds — the ceiling reverts to the on-chain budget.
-                            Trade-off: the client trusts the operator&rsquo;s metering, bounded by the escrow deposit
-                            (the operator can sign any cumulative amount up to <code>deposit</code>), rather than
-                            authorizing each increment with its own signature.
+                            and the operator signs just one voucher per settlement (~
+                            {formatCompact(settlementsPerSecond, 2)}/s). The off-chain Ed25519 fleet no longer binds —
+                            the ceiling reverts to the on-chain budget. Trade-off: the client trusts the
+                            operator&rsquo;s metering, bounded by the escrow deposit (the operator can sign any
+                            cumulative amount up to <code>deposit</code>), rather than authorizing each increment with
+                            its own signature.
                         </small>
                     </div>
                 )}
@@ -1100,9 +1321,10 @@ export function App() {
                     <div className="capacity-equation">
                         <span>Enforceability checkpoints</span>
                         <strong>
-                            {formatCompact(checkpointsPerSecond, 2)} settles/s × {formatInteger(checkpointCostPerChannelUnits)}{' '}
-                            CU = {formatCompact(checkpointCostUnitsPerSecond, 2)} CU/s ({formatPercent(checkpointBudgetSharePercent)}{' '}
-                            of budget)
+                            {formatCompact(checkpointsPerSecond, 2)} settles/s ×{' '}
+                            {formatInteger(checkpointCostPerChannelUnits)} CU ={' '}
+                            {formatCompact(checkpointCostUnitsPerSecond, 2)} CU/s (
+                            {formatPercent(checkpointBudgetSharePercent)} of budget)
                         </strong>
                         <small>
                             {inputs.scheme === 'mpp'
@@ -1129,6 +1351,8 @@ export function App() {
                                     <br />
                                     ⚠️ the queue grows without bound, so this rate is not actually settleable.
                                 </>
+                            ) : checkpointsEnabled ? (
+                                `Enforceable within ${formatCompact(settlementLatencySeconds, 2)}s: interim checkpoints make accrued value claimable on-chain at the ${formatCompact(inputs.checkpointClockSeconds, 2)}s checkpoint cadence, ahead of the ${formatCompact(settlementWindowSeconds, 2)}s cash-sweep close. One cash-sweep window generates ${formatCompact(onChainTxPerWindow, 2)} settlement transactions.`
                             ) : (
                                 `Settlements clear within the window: a payment finalizes on-chain up to ${formatCompact(settlementLatencySeconds, 2)}s after it is made (one session length). One session generates ${formatCompact(onChainTxPerWindow, 2)} settlement transactions.`
                             )}
@@ -1278,11 +1502,17 @@ export function App() {
                                         </div>
                                     )}
                                     <div>
-                                        <span>{isPersistentChannel(inputs.mode) ? 'Channel builds+teardowns' : 'Channel opens+closes'}</span>
+                                        <span>
+                                            {isPersistentChannel(inputs.mode)
+                                                ? 'Channel builds+teardowns'
+                                                : 'Channel opens+closes'}
+                                        </span>
                                         <strong>{formatCompact(channelBuildsPerSecond, 2)} / second</strong>
                                     </div>
                                     <div>
-                                        <span>{isPersistentChannel(inputs.mode) ? 'Re-arm rate' : 'Settlement rate'}</span>
+                                        <span>
+                                            {isPersistentChannel(inputs.mode) ? 'Re-arm rate' : 'Settlement rate'}
+                                        </span>
                                         <strong>{formatCompact(settlementsPerSecond, 2)} / second</strong>
                                     </div>
                                     <div>
@@ -1345,11 +1575,15 @@ export function App() {
                                                 <>
                                                     <div>
                                                         <span>Checkpoint cost / channel</span>
-                                                        <strong>{formatInteger(checkpointCostPerChannelUnits)} units</strong>
+                                                        <strong>
+                                                            {formatInteger(checkpointCostPerChannelUnits)} units
+                                                        </strong>
                                                     </div>
                                                     <div>
                                                         <span>Checkpoint tx / second</span>
-                                                        <strong>{formatCompact(checkpointTransactionsPerSecond, 2)}</strong>
+                                                        <strong>
+                                                            {formatCompact(checkpointTransactionsPerSecond, 2)}
+                                                        </strong>
                                                     </div>
                                                 </>
                                             )}
@@ -1371,7 +1605,11 @@ export function App() {
                                         </>
                                     )}
                                     <div>
-                                        <span>{isPersistentChannel(inputs.mode) ? 'Boundary cost / session' : 'Lifecycle cost'}</span>
+                                        <span>
+                                            {isPersistentChannel(inputs.mode)
+                                                ? 'Boundary cost / session'
+                                                : 'Lifecycle cost'}
+                                        </span>
                                         <strong>{formatInteger(costPerLifecycle)} units / channel</strong>
                                     </div>
                                 </div>
@@ -1399,12 +1637,18 @@ export function App() {
                                     <div>
                                         <span>{perPaymentVerify ? 'Verification load' : 'Operator signing load'}</span>
                                         <strong>
-                                            {formatCompact(perPaymentVerify ? logicalRequestsPerSecond : settlementsPerSecond, 2)} / second
+                                            {formatCompact(
+                                                perPaymentVerify ? logicalRequestsPerSecond : settlementsPerSecond,
+                                                2,
+                                            )}{' '}
+                                            / second
                                         </strong>
                                     </div>
                                     <div>
                                         <span>Verify budget used</span>
-                                        <strong>{perPaymentVerify ? formatPercent(voucherVerifySharePercent) : 'n/a'}</strong>
+                                        <strong>
+                                            {perPaymentVerify ? formatPercent(voucherVerifySharePercent) : 'n/a'}
+                                        </strong>
                                     </div>
                                     <div>
                                         <span>Binding constraint</span>
@@ -1640,8 +1884,8 @@ export function App() {
                     {demand.priorityFeeLamportsPerTx > 0
                         ? ` + ${formatInteger(demand.priorityFeeLamportsPerTx)} lamports priority`
                         : ''}
-                    , over {formatCompact(physicalTransactionsPerSecond, 2)} physical tx/s. Rent and escrow are refundable
-                    capital, not a burn — only their carrying cost is a true operating expense.
+                    , over {formatCompact(physicalTransactionsPerSecond, 2)} physical tx/s. Rent and escrow are
+                    refundable capital, not a burn — only their carrying cost is a true operating expense.
                 </p>
             </section>
 
