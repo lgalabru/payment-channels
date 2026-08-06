@@ -35,7 +35,9 @@ jobs:
           node-version: 20
           cache: pnpm
           cache-dependency-path: web/pnpm-lock.yaml
-      - run: pnpm install --frozen-lockfile
+      # web/ lives outside the repo's pnpm workspace (packages: clients/*), so install it
+      # standalone against its own lockfile rather than the workspace root.
+      - run: pnpm install --frozen-lockfile --ignore-workspace
       - run: pnpm build
       - uses: actions/upload-pages-artifact@v3
         with:
