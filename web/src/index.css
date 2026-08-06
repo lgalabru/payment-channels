@@ -844,6 +844,30 @@ progress::-moz-progress-bar {
     line-height: 1.4;
 }
 
+.capacity-equation small code {
+    background: rgba(23, 23, 23, 0.08);
+    border-radius: 4px;
+    font-size: 0.9em;
+    padding: 1px 5px;
+}
+
+/* Signals the mpp-operator trust trade-off: the operator, not a per-payment signature, controls the meter. */
+.trust-badge {
+    background: rgba(246, 130, 31, 0.12);
+    border: 1px solid var(--accent);
+    border-radius: 999px;
+    color: var(--accent);
+    font-family: system-ui, sans-serif;
+    font-size: 0.62rem;
+    font-weight: 700;
+    letter-spacing: 0.03em;
+    margin-left: 10px;
+    padding: 2px 9px;
+    text-transform: uppercase;
+    vertical-align: middle;
+    white-space: nowrap;
+}
+
 .verdict {
     align-items: baseline;
     border-top: 1px solid rgba(23, 23, 23, 0.3);
