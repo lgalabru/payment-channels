@@ -397,7 +397,9 @@ export function App() {
                             SOLANA-FOUNDATION/PAYMENT-CHANNELS
                         </a>
                     </p>
-                    <h1>Roadmap to 10M payments / sec</h1>
+                    <h1>
+                        Roadmap to <span>10M payments / sec</span>
+                    </h1>
                     <p className="lede">
                         Agentic payment volume is about to explode — and Solana is all-in on absorbing it. Model the
                         demand, pick a rail, and pressure-test the path to 10M requests per second. Every number is an
